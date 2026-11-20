@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../app_state.dart';
 import 'home_page.dart';
+import 'log_page.dart';
 import 'servers_page.dart';
 import 'settings_page.dart';
 
@@ -105,8 +106,10 @@ class _RootShellState extends State<RootShell> {
             HomePage(
               state: widget.state,
               onOpenServers: () => setState(() => _index = 1),
+              onOpenLog: () => setState(() => _index = 2),
             ),
             ServersPage(state: widget.state),
+            LogPage(state: widget.state),
             SettingsPage(state: widget.state),
           ],
         ),
@@ -124,6 +127,11 @@ class _RootShellState extends State<RootShell> {
             icon: Icon(Icons.dns_outlined),
             selectedIcon: Icon(Icons.dns_rounded),
             label: 'Server',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.article_outlined),
+            selectedIcon: Icon(Icons.article_rounded),
+            label: 'Log',
           ),
           NavigationDestination(
             icon: Icon(Icons.tune_rounded),

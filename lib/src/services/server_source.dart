@@ -16,7 +16,10 @@ class ServerSource {
 
   final http.Client _client = http.Client();
 
-  Future<List<ServerNode>> fetchAll(List<String> sources) async {
+  Future<List<ServerNode>> fetchAll(
+    List<String> sources, {
+    void Function(String url, int count)? onSource,
+  }) async {
     final unique = sources
         .map((source) => source.trim())
         .where((source) => source.isNotEmpty)
@@ -27,7 +30,9 @@ class ServerSource {
     final results = await Future.wait(unique.map(_fetchOne));
     final merged = <ServerNode>[];
     final seen = <String>{};
-    for (final list in results) {
+    for (var index = 0; index < results.length; index++) {
+      final list = results[index];
+      onSource?.call(unique[index], list.length);
       for (final node in list) {
         if (seen.add(node.id)) merged.add(node);
       }

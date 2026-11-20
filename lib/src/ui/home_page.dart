@@ -5,10 +5,16 @@ import '../theme.dart';
 import 'widgets.dart';
 
 class HomePage extends StatelessWidget {
-  const HomePage({super.key, required this.state, required this.onOpenServers});
+  const HomePage({
+    super.key,
+    required this.state,
+    required this.onOpenServers,
+    required this.onOpenLog,
+  });
 
   final AppState state;
   final VoidCallback onOpenServers;
+  final VoidCallback onOpenLog;
 
   @override
   Widget build(BuildContext context) {
@@ -25,7 +31,7 @@ class HomePage extends StatelessWidget {
               const SizedBox(height: 12),
             ],
             if (state.lastError != null) ...[
-              _ErrorBanner(state: state),
+              _ErrorBanner(state: state, onOpenLog: onOpenLog),
               const SizedBox(height: 12),
             ],
             if (state.notice != null) ...[
@@ -512,9 +518,10 @@ class _UpdateBanner extends StatelessWidget {
 }
 
 class _ErrorBanner extends StatelessWidget {
-  const _ErrorBanner({required this.state});
+  const _ErrorBanner({required this.state, required this.onOpenLog});
 
   final AppState state;
+  final VoidCallback onOpenLog;
 
   @override
   Widget build(BuildContext context) {
@@ -534,6 +541,7 @@ class _ErrorBanner extends StatelessWidget {
               ),
             ),
           ),
+          TextButton(onPressed: onOpenLog, child: const Text('Log')),
           IconButton(
             onPressed: state.clearMessages,
             icon: const Icon(Icons.close_rounded, size: 18),

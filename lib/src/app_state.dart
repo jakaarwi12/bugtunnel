@@ -9,12 +9,21 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'models.dart';
+import 'log.dart';
 import 'services/latency.dart';
 import 'services/server_source.dart';
 import 'services/update_service.dart';
 import 'services/xray_config.dart';
 
 enum TunnelState { disconnected, connecting, connected, disconnecting }
+
+class _Attempt {
+  const _Attempt(this.node, this.host, this.mode);
+
+  final ServerNode node;
+  final String host;
+  final String mode;
+}
 
 class AppState extends ChangeNotifier {
   static const _kBugHost = 'bug_host';
@@ -26,6 +35,9 @@ class AppState extends ChangeNotifier {
 
   final ServerSource _serverSource = ServerSource();
   late SharedPreferences _prefs;
+
+  final List<LogEntry> logs = [];
+  static const int _maxLogs = 800;
 
   String bugHost = '';
   List<String> sources = List<String>.from(ServerSource.defaults);
@@ -75,6 +87,78 @@ class AppState extends ChangeNotifier {
     return DateTime.now().difference(since);
   }
 
+  void addLog(LogLevel level, String message) {
+    logs.add(LogEntry(time: DateTime.now(), level: level, message: message));
+    if (logs.length > _maxLogs) {
+      logs.removeRange(0, logs.length - _maxLogs);
+    }
+    _notify();
+  }
+
+  void clearLogs() {
+    logs.clear();
+    _notify();
+  }
+
+  String exportLogs() {
+    final buffer = StringBuffer()
+      ..writeln('BugTunnel $appVersion ($appBuild)')
+      ..writeln('Android: ${Platform.operatingSystemVersion}')
+      ..writeln('Bug host: ${bugHost.isEmpty ? 'tidak diisi' : bugHost}')
+      ..writeln('Sumber server: ${sources.length}')
+      ..writeln('Server terpilih: ${selected?.name ?? '-'}')
+      ..writeln('----------------------------------------');
+    for (final entry in logs) {
+      buffer.writeln(entry.toLine());
+    }
+    return buffer.toString();
+  }
+
+  Future<void> captureSystemLog() async {
+    if (!Platform.isAndroid) {
+      addLog(LogLevel.info, 'Log sistem hanya tersedia di Android.');
+      return;
+    }
+    addLog(LogLevel.info, 'Membaca log sistem (logcat)...');
+    try {
+      final result = await Process.run('/system/bin/logcat', [
+        '-d',
+        '-v',
+        'time',
+        '-t',
+        '500',
+      ]).timeout(const Duration(seconds: 6));
+      final text = '${result.stdout}';
+      final lines = text
+          .split('\n')
+          .where((line) {
+            final lower = line.toLowerCase();
+            return lower.contains('v2ray') ||
+                lower.contains('xray') ||
+                lower.contains('tun2socks') ||
+                lower.contains('vpn_service') ||
+                lower.contains('bugtunnel');
+          })
+          .take(150)
+          .toList();
+
+      if (lines.isEmpty) {
+        addLog(LogLevel.warning, 'Log sistem: tidak ada baris terkait Xray.');
+        return;
+      }
+      addLog(LogLevel.info, '--- Log sistem (${lines.length} baris) ---');
+      for (final line in lines) {
+        final trimmed = line.trim();
+        addLog(
+          LogLevel.info,
+          trimmed.length > 300 ? trimmed.substring(0, 300) : trimmed,
+        );
+      }
+    } catch (error) {
+      addLog(LogLevel.warning, 'Log sistem tidak bisa dibaca: $error');
+    }
+  }
+
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
     bugHost = _prefs.getString(_kBugHost) ?? '';
@@ -95,6 +179,13 @@ class AppState extends ChangeNotifier {
     } catch (_) {
       // Versi tetap memakai nilai bawaan bila platform tidak mendukung.
     }
+
+    addLog(LogLevel.info, 'BugTunnel $appVersion ($appBuild) dimulai');
+    addLog(
+      LogLevel.info,
+      'Bug host: ${bugHost.isEmpty ? 'tidak diisi' : bugHost}',
+    );
+    addLog(LogLevel.info, 'Sumber server: ${sources.length}');
 
     await _initCore();
     _notify();
@@ -151,9 +242,11 @@ class AppState extends ChangeNotifier {
       _core = FlutterV2ray(onStatusChanged: _onStatus);
       await _core!.initializeV2Ray();
       _coreReady = true;
+      addLog(LogLevel.success, 'Mesin Xray siap');
     } catch (error) {
       _coreReady = false;
       lastError = 'Mesin tunnel gagal disiapkan: $error';
+      addLog(LogLevel.error, 'Mesin Xray gagal disiapkan: $error');
     }
   }
 
@@ -161,6 +254,7 @@ class AppState extends ChangeNotifier {
     if (_disposed) return;
     traffic = status;
     final value = status.state.toUpperCase();
+    final previous = tunnel;
 
     if (value.contains('DISCONNECT')) {
       if (tunnel != TunnelState.disconnecting) {
@@ -176,6 +270,15 @@ class AppState extends ChangeNotifier {
         connectedSince ??= DateTime.now();
         _startTicker();
       }
+    }
+
+    if (tunnel != previous) {
+      final level = tunnel == TunnelState.connected
+          ? LogLevel.success
+          : tunnel == TunnelState.disconnected
+          ? LogLevel.warning
+          : LogLevel.info;
+      addLog(level, 'Status core: ${status.state}');
     }
     _notify();
   }
@@ -196,19 +299,35 @@ class AppState extends ChangeNotifier {
     loadingServers = true;
     serversError = null;
     lastError = null;
+    addLog(LogLevel.info, 'Memuat server dari ${sources.length} sumber...');
+    final started = DateTime.now();
     _notify();
 
     try {
-      final fetched = await _serverSource.fetchAll(sources);
+      final fetched = await _serverSource.fetchAll(
+        sources,
+        onSource: (url, count) {
+          final level = count > 0 ? LogLevel.info : LogLevel.warning;
+          addLog(level, 'Sumber ${_shortUrl(url)}: $count server');
+        },
+      );
       if (fetched.isEmpty) {
         serversError = 'Tidak ada server yang bisa dibaca. Periksa koneksi internet atau sumber server di Pengaturan.';
+        addLog(LogLevel.error, serversError!);
         return;
       }
+      final seconds = DateTime.now().difference(started).inSeconds;
+      addLog(
+        LogLevel.info,
+        'Total ${fetched.length} server unik (${seconds}s), menguji ping...',
+      );
       servers = await LatencyTester.rank(fetched);
       _autoPick();
       _persistCache();
+      _logTopServers();
     } catch (error) {
       serversError = 'Gagal memuat server: $error';
+      addLog(LogLevel.error, serversError!);
     } finally {
       loadingServers = false;
       _notify();
@@ -218,16 +337,72 @@ class AppState extends ChangeNotifier {
   Future<void> pingServers() async {
     if (loadingServers || servers.isEmpty) return;
     loadingServers = true;
+    addLog(LogLevel.info, 'Menguji ulang ping ${servers.length} server...');
     _notify();
     try {
       servers = await LatencyTester.rank(servers, limit: 120);
       _autoPick();
       _persistCache();
+      _logTopServers();
     } catch (error) {
       lastError = 'Gagal menguji server: $error';
+      addLog(LogLevel.error, lastError!);
     } finally {
       loadingServers = false;
       _notify();
+    }
+  }
+
+  void _logTopServers() {
+    final alive = servers.where((node) => node.alive).toList();
+    addLog(
+      LogLevel.info,
+      'Hasil ping: ${alive.length} aktif dari ${servers.length} server',
+    );
+    for (final node in servers.take(5)) {
+      addLog(
+        node.alive ? LogLevel.success : LogLevel.warning,
+        'Ping ${node.name} (${node.endpoint}): '
+        '${node.alive ? '${node.latencyMs} ms' : 'tidak merespons'}',
+      );
+    }
+  }
+
+  String _shortUrl(String url) {
+    var value = url
+        .replaceFirst('https://', '')
+        .replaceFirst('http://', '')
+        .replaceFirst('www.', '');
+    if (value.length > 42) value = '${value.substring(0, 42)}...';
+    return value;
+  }
+
+  Future<void> testSelectedServer() async {
+    final node = selected;
+    if (node == null) {
+      addLog(LogLevel.warning, 'Tes manual: belum ada server terpilih.');
+      return;
+    }
+    if (tunnel == TunnelState.connected) {
+      addLog(
+        LogLevel.warning,
+        'Tes manual: putuskan koneksi dulu sebelum menguji server.',
+      );
+      return;
+    }
+    if (!_coreReady) await _initCore();
+    if (_core == null) {
+      addLog(LogLevel.error, 'Tes manual: mesin Xray tidak siap.');
+      return;
+    }
+
+    addLog(LogLevel.info, 'Tes manual server ${node.name}');
+    final withBug = await _probe(
+      _Attempt(node, bugHost, bugHost.isEmpty ? 'bawaan' : 'bug host'),
+    );
+    if (!withBug && bugHost.isNotEmpty) {
+      addLog(LogLevel.info, 'Mencoba tes ulang tanpa bug host...');
+      await _probe(_Attempt(node, '', 'tanpa bug host'));
     }
   }
 
@@ -311,19 +486,29 @@ class AppState extends ChangeNotifier {
 
     try {
       final granted = await _core!.requestPermission();
+      addLog(
+        granted ? LogLevel.success : LogLevel.error,
+        granted ? 'Izin VPN diberikan' : 'Izin VPN ditolak',
+      );
       if (!granted) {
         lastError = 'Izin VPN ditolak. Izinkan BugTunnel membuat koneksi VPN, lalu coba lagi.';
         return;
       }
 
-      final ordered = await _prioritize(candidates);
-      for (final node in ordered) {
-        if (await _tryConnect(node)) return;
+      final attempts = _buildAttempts(candidates);
+      addLog(LogLevel.info, '${attempts.length} percobaan disiapkan');
+
+      final ordered = await _prioritize(attempts);
+      for (final attempt in ordered) {
+        if (await _tryConnect(attempt)) return;
       }
       lastError =
           'Semua server gagal terhubung. Coba muat ulang daftar server.';
+      addLog(LogLevel.error, lastError!);
+      await captureSystemLog();
     } catch (error) {
       lastError = 'Gagal menyambung: $error';
+      addLog(LogLevel.error, lastError!);
     } finally {
       busy = false;
       notice = null;
@@ -334,6 +519,20 @@ class AppState extends ChangeNotifier {
       }
       _notify();
     }
+  }
+
+  List<_Attempt> _buildAttempts(List<ServerNode> candidates) {
+    final attempts = <_Attempt>[];
+    for (final node in candidates) {
+      if (bugHost.isNotEmpty) {
+        attempts.add(_Attempt(node, bugHost, 'bug host'));
+      }
+      attempts.add(
+        _Attempt(node, '', bugHost.isEmpty ? 'bawaan' : 'tanpa bug host'),
+      );
+      if (attempts.length >= 4) break;
+    }
+    return attempts;
   }
 
   List<ServerNode> _connectCandidates() {
@@ -363,51 +562,75 @@ class AppState extends ChangeNotifier {
   /// Ping TCP hanya membuktikan port terbuka. Banyak server gratis menerima
   /// koneksi tetapi tidak bisa keluar ke internet. `getServerDelay` memakai
   /// core Xray untuk mengambil URL lewat server tersebut.
-  Future<bool> _probe(ServerNode node) async {
+  Future<bool> _probe(_Attempt attempt) async {
     final core = _core;
     if (core == null) return false;
+    addLog(LogLevel.info, 'Tes ${attempt.node.name} (${attempt.mode})...');
     try {
-      final config = XrayConfig.build(node, bugHost: bugHost);
+      final config = XrayConfig.build(attempt.node, bugHost: attempt.host);
       final delay = await core
           .getServerDelay(
             config: config,
             url: 'https://www.gstatic.com/generate_204',
           )
           .timeout(const Duration(seconds: 6), onTimeout: () => -1);
-      return delay > 0;
-    } catch (_) {
+      if (delay > 0) {
+        addLog(
+          LogLevel.success,
+          'Tes ${attempt.node.name} (${attempt.mode}) lolos: $delay ms',
+        );
+        return true;
+      }
+      addLog(
+        LogLevel.warning,
+        'Tes ${attempt.node.name} (${attempt.mode}) gagal: $delay',
+      );
+      return false;
+    } catch (error) {
+      addLog(
+        LogLevel.warning,
+        'Tes ${attempt.node.name} (${attempt.mode}) error: $error',
+      );
       return false;
     }
   }
 
-  /// Menaruh server yang lolos tes nyata di depan, tanpa membuang kandidat lain.
-  Future<List<ServerNode>> _prioritize(List<ServerNode> candidates) async {
-    if (candidates.length <= 1) return candidates;
+  /// Menaruh percobaan yang lolos tes nyata di depan.
+  Future<List<_Attempt>> _prioritize(List<_Attempt> attempts) async {
+    if (attempts.length <= 1) return attempts;
 
-    final passed = <ServerNode>[];
-    final failed = <ServerNode>[];
-    for (final node in candidates.take(2)) {
-      if (await _probe(node)) {
-        passed.add(node);
+    final passed = <_Attempt>[];
+    final failed = <_Attempt>[];
+    for (final attempt in attempts.take(2)) {
+      if (await _probe(attempt)) {
+        passed.add(attempt);
       } else {
-        failed.add(node);
+        failed.add(attempt);
       }
     }
-    return [...passed, ...failed, ...candidates.skip(2)];
+    return [...passed, ...failed, ...attempts.skip(2)];
   }
 
-  Future<bool> _tryConnect(ServerNode node) async {
+  Future<bool> _tryConnect(_Attempt attempt) async {
+    final node = attempt.node;
     selected = node;
     tunnel = TunnelState.connecting;
     notice = 'Mencoba ${node.name}...';
+    addLog(LogLevel.info, 'Mencoba ${node.name} (${attempt.mode})');
+    try {
+      addLog(LogLevel.info, XrayConfig.describe(node, bugHost: attempt.host));
+    } catch (error) {
+      addLog(LogLevel.warning, 'Ringkasan konfigurasi gagal: $error');
+    }
     _notify();
 
     try {
-      final config = XrayConfig.build(node, bugHost: bugHost);
+      final config = XrayConfig.build(node, bugHost: attempt.host);
       await _core!.startV2Ray(
         remark: 'BugTunnel • ${node.name}',
         config: config,
       );
+      addLog(LogLevel.info, 'Perintah start dikirim, menunggu status...');
 
       final deadline = DateTime.now().add(const Duration(seconds: 10));
       while (DateTime.now().isBefore(deadline)) {
@@ -417,16 +640,25 @@ class AppState extends ChangeNotifier {
           _prefs.setString(_kSelected, node.raw);
           _persistCache();
           notice = null;
+          addLog(
+            LogLevel.success,
+            'Terhubung ke ${node.name} (${attempt.mode})',
+          );
           return true;
         }
       }
 
+      addLog(
+        LogLevel.warning,
+        '${node.name} (${attempt.mode}) tidak terhubung dalam 10 detik',
+      );
       await _core!.stopV2Ray();
       _markDead(node);
       return false;
     } catch (error) {
       _markDead(node);
       lastError = '${node.name} gagal: $error';
+      addLog(LogLevel.error, lastError!);
       try {
         await _core!.stopV2Ray();
       } catch (_) {
@@ -455,6 +687,7 @@ class AppState extends ChangeNotifier {
       // Tetap anggap terputus walau layanan sudah mati.
     }
 
+    addLog(LogLevel.info, 'Koneksi diputuskan');
     tunnel = TunnelState.disconnected;
     connectedSince = null;
     traffic = null;
@@ -466,6 +699,10 @@ class AppState extends ChangeNotifier {
   void setBugHost(String value) {
     bugHost = value.trim();
     _prefs.setString(_kBugHost, bugHost);
+    addLog(
+      LogLevel.info,
+      'Bug host diubah: ${bugHost.isEmpty ? 'dikosongkan' : bugHost}',
+    );
     _notify();
   }
 
@@ -479,6 +716,7 @@ class AppState extends ChangeNotifier {
         ? List<String>.from(ServerSource.defaults)
         : cleaned;
     await _prefs.setStringList(_kSources, sources);
+    addLog(LogLevel.info, 'Sumber server diubah: ${sources.length} URL');
     _notify();
   }
 
@@ -501,21 +739,29 @@ class AppState extends ChangeNotifier {
     _notify();
 
     try {
+      addLog(LogLevel.info, 'Memeriksa pembaruan...');
       final latest = await UpdateService.fetchLatest();
       if (latest == null) {
         if (!silent) notice = 'Tidak bisa memeriksa pembaruan sekarang.';
+        addLog(LogLevel.warning, 'Pembaruan tidak bisa diperiksa');
         return null;
       }
       if (UpdateService.isNewer(latest.version, appVersion)) {
         update = latest;
         updatePromptPending = true;
+        addLog(
+          LogLevel.info,
+          'Versi ${latest.version} tersedia (terpasang $appVersion)',
+        );
         return latest;
       }
       update = null;
+      addLog(LogLevel.info, 'Sudah memakai versi terbaru ($appVersion)');
       if (!silent) notice = 'Kamu sudah memakai versi terbaru ($appVersion).';
       return null;
     } catch (error) {
       if (!silent) notice = 'Gagal memeriksa pembaruan: $error';
+      addLog(LogLevel.warning, 'Gagal memeriksa pembaruan: $error');
       return null;
     } finally {
       checkingUpdate = false;
@@ -572,6 +818,7 @@ class AppState extends ChangeNotifier {
     await _prefs.remove(_kAutoUpdate);
     await _prefs.remove(_kSelected);
     await _prefs.remove(_kCache);
+    addLog(LogLevel.info, 'Pengaturan direset');
     _notify();
   }
 

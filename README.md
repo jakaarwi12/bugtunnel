@@ -8,7 +8,8 @@ Dibangun dengan Flutter/Dart dan `flutter_v2ray` (Xray core). APK di-build oleh 
 
 - **Server otomatis** — mengambil beberapa daftar server publik, menguji koneksi TCP, dan memilih ping terendah.
 - **Bug host** — menimpa SNI dan header `Host` pada server TLS/WS/HTTP/gRPC. Kosongkan bila server tidak memerlukannya.
-- **Failover** — bila server terpilih gagal, aplikasi mencoba hingga tiga server terbaik berikutnya.
+- **Failover** — bila server terpilih gagal, aplikasi mencoba hingga tiga server terbaik berikutnya, termasuk percobaan **tanpa bug host** bila bug host membuat koneksi gagal.
+- **Log koneksi** — tab **Log** menampilkan detail pemuatan server, hasil ping, tes server, status Xray, dan error. Semua log bisa disalin atau ditambah dengan log sistem (logcat).
 - **Daftar server** — lihat semua server, ping, pilih manual, atau muat ulang.
 - **Pembaruan otomatis** — membandingkan versi terpasang dengan rilis terbaru di GitHub dan menawarkan unduhan APK.
 - **Tanpa analytics** — pengaturan dan cache server hanya disimpan di perangkat.
@@ -108,9 +109,22 @@ tool/
 ## Batasan
 
 - Hanya Android (paket `flutter_v2ray` tidak mendukung iOS/desktop).
-- Tes ping memakai koneksi TCP, bukan handshake proxy penuh. Server bisa terlihat hidup tetapi tetap gagal saat dipakai; failover menangani kasus ini.
+- Tes ping memakai koneksi TCP, bukan handshake proxy penuh. Server bisa terlihat hidup tetapi tetap gagal saat dipakai; tes `generate_204` dan failover menangani kasus ini.
 - Bug host hanya menimpa SNI/Host. Tidak ada manipulasi payload, DNS, atau kuota operator.
 - Aplikasi tidak menyediakan server, akun, atau langganan.
+
+## Troubleshooting
+
+**Tersambung tetapi Chrome/YouTube tidak bisa internet**
+
+1. Buka tab **Log**, tekan **Tes server terpilih**. Kalau tes gagal, server memang tidak bisa meneruskan trafik.
+2. Kosongkan **Bug host**, lalu coba sambung lagi. Aplikasi juga otomatis mencoba tanpa bug host bila bug host gagal.
+3. Set **Private DNS** Android ke **Off** atau **Automatic**.
+4. Muat ulang daftar server; server publik sering mati.
+
+**Semua server gagal**
+
+Salin log dari tab **Log** (tombol **Salin semua**) dan periksa baris `ERROR`. Baris `Tes ... gagal` berarti server tidak lolos uji; `Log sistem` berisi pesan asli dari Xray/tun2socks.
 
 ## Lisensi
 

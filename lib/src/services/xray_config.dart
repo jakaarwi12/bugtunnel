@@ -23,6 +23,7 @@ class XrayConfig {
 
     _enableSniffing(map);
     _applyRouting(map);
+    _applyDns(map);
 
     if (host.isNotEmpty) {
       _applyBugHost(map, host);
@@ -52,7 +53,9 @@ class XrayConfig {
 
   static void _applyRouting(Map<String, dynamic> config) {
     config['routing'] = {
-      'domainStrategy': 'IPIfNonMatch',
+      // Jangan paksa Xray menyelesaikan domain untuk pencocokan aturan.
+      // Domain hasil sniffing diteruskan apa adanya ke server.
+      'domainStrategy': 'AsIs',
       'rules': [
         {'type': 'field', 'port': '53', 'outboundTag': 'direct'},
         {
@@ -71,6 +74,56 @@ class XrayConfig {
       ],
       'balancers': <dynamic>[],
     };
+  }
+
+  static void _applyDns(Map<String, dynamic> config) {
+    config['dns'] = {
+      'servers': ['8.8.8.8', '1.1.1.1'],
+    };
+  }
+
+  /// Ringkasan konfigurasi yang aman ditampilkan di log.
+  ///
+  /// Tidak pernah memuat id/password/URL lengkap.
+  static String describe(ServerNode node, {String bugHost = ''}) {
+    final map =
+        jsonDecode(build(node, bugHost: bugHost)) as Map<String, dynamic>;
+    final outbounds = map['outbounds'];
+
+    Map<dynamic, dynamic>? proxy;
+    if (outbounds is List) {
+      for (final item in outbounds) {
+        if (item is Map &&
+            item['protocol'] != 'freedom' &&
+            item['protocol'] != 'blackhole') {
+          proxy = item;
+          break;
+        }
+      }
+    }
+
+    final stream = proxy?['streamSettings'];
+    final network = stream is Map ? stream['network'] : null;
+    final security = stream is Map ? stream['security'] : null;
+
+    String? sni;
+    String? host;
+    var insecure = false;
+    if (stream is Map) {
+      final tls = stream['tlsSettings'];
+      if (tls is Map) {
+        sni = tls['serverName']?.toString();
+        insecure = tls['allowInsecure'] == true;
+      }
+      final ws = stream['wsSettings'];
+      if (ws is Map && ws['headers'] is Map) {
+        host = (ws['headers'] as Map)['Host']?.toString();
+      }
+    }
+
+    return '${node.protocol} ${node.endpoint} '
+        'net=${network ?? '-'} security=${security ?? '-'} '
+        'sni=${sni ?? '-'} host=${host ?? '-'} insecure=$insecure';
   }
 
   static void _applyBugHost(Map<String, dynamic> config, String bugHost) {
