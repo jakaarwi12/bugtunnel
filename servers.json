@@ -1,0 +1,5 @@
+{
+  "name": "BugTunnel server source template",
+  "note": "File ini bukan daftar server yang berfungsi. Tambahkan URL langganan milikmu di aplikasi: Pengaturan > Sumber server. Kamu bisa memakai file ini sebagai contoh format JSON.",
+  "servers": []
+}
