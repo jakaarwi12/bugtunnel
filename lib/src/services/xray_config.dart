@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_v2ray/flutter_v2ray.dart';
 
@@ -7,34 +8,70 @@ import '../models.dart';
 class XrayConfig {
   /// Membangun konfigurasi Xray dari link server.
   ///
-  /// Selain menimpa SNI/header Host dengan bug host, konfigurasi ini juga
-  /// memperbaiki routing yang dipakai plugin:
+  /// [overrideSni] menentukan apakah bug host juga mengganti SNI. Default
+  /// hanya mengganti header Host, karena banyak server memakai SNI sendiri
+  /// dan menolak SNI lain.
   ///
-  /// - DNS (port 53) dikirim langsung, bukan lewat proxy. Banyak server gratis
-  ///   tidak mendukung UDP, sehingga DNS lewat proxy membuat aplikasi seperti
-  ///   Chrome dan YouTube seolah "tidak ada internet" walau ping ke IP jalan.
-  /// - Alamat privat/LAN tetap langsung agar tidak dipaksa lewat server.
-  /// - Sniffing diaktifkan supaya domain tujuan terbaca.
-  static String build(ServerNode node, {String bugHost = ''}) {
+  /// [dnsMode] `direct` mengirim DNS (port 53) lewat jaringan langsung,
+  /// `proxy` membiarkannya lewat server.
+  static String build(
+    ServerNode node, {
+    String bugHost = '',
+    bool overrideSni = false,
+    String dnsMode = 'direct',
+  }) {
     final parser = parseV2RayURL(node.raw);
     final map =
         jsonDecode(parser.getFullConfiguration()) as Map<String, dynamic>;
     final host = bugHost.trim();
 
     _enableSniffing(map);
-    _applyRouting(map);
+    _applyRouting(map, dnsMode);
     _applyDns(map);
 
     if (host.isNotEmpty) {
-      _applyBugHost(map, host);
-      // SNI diganti, jadi sertifikat server tidak akan cocok dengan nama host
-      // baru. Tanpa ini, TLS gagal dan semua koneksi mati.
-      _setAllowInsecure(map);
+      _applyBugHost(map, host, overrideSni: overrideSni);
+      if (overrideSni) {
+        // SNI diganti, jadi sertifikat server tidak akan cocok.
+        _setAllowInsecure(map);
+      }
     } else if (_wantsInsecure(node.raw)) {
       _setAllowInsecure(map);
     }
 
     return jsonEncode(map);
+  }
+
+  /// Mengembalikan alasan server tidak mungkin dipakai, atau null bila valid.
+  ///
+  /// Xray menolak VLESS tanpa TLS ke alamat IP publik. Node seperti ini
+  /// selalu gagal dan sebaiknya dilewati.
+  static String? validationError(ServerNode node) {
+    try {
+      final parser = parseV2RayURL(node.raw);
+      final map =
+          jsonDecode(parser.getFullConfiguration()) as Map<String, dynamic>;
+      final outbounds = map['outbounds'];
+      if (outbounds is! List) return null;
+
+      for (final item in outbounds) {
+        if (item is! Map) continue;
+        if (item['protocol'] != 'vless') continue;
+        final stream = item['streamSettings'];
+        final security = stream is Map
+            ? (stream['security']?.toString() ?? '')
+            : '';
+        if (security.isNotEmpty && security != 'none') continue;
+
+        final address = InternetAddress.tryParse(node.address);
+        if (address == null) continue;
+        if (_isPrivate(address)) continue;
+        return 'VLESS tanpa TLS ke IP publik tidak didukung Xray';
+      }
+    } catch (_) {
+      // Konfigurasi rusak akan gagal di tahap lain.
+    }
+    return null;
   }
 
   static void _enableSniffing(Map<String, dynamic> config) {
@@ -51,43 +88,71 @@ class XrayConfig {
     }
   }
 
-  static void _applyRouting(Map<String, dynamic> config) {
+  static void _applyRouting(Map<String, dynamic> config, String dnsMode) {
+    final dnsTarget = dnsMode == 'proxy' ? _proxyTag(config) : 'direct';
+    final rules = <Map<String, dynamic>>[
+      // Query DNS yang dibuat Xray sendiri ikut mode yang dipilih.
+      {
+        'type': 'field',
+        'inboundTag': const ['dns_query'],
+        'outboundTag': dnsTarget,
+      },
+      // DNS dari aplikasi (lewat TUN → SOCKS) memakai port 53.
+      {'type': 'field', 'port': '53', 'outboundTag': dnsTarget},
+      {
+        'type': 'field',
+        'ip': const [
+          '10.0.0.0/8',
+          '172.16.0.0/12',
+          '192.168.0.0/16',
+          '127.0.0.0/8',
+          '169.254.0.0/16',
+          'fc00::/7',
+          'fe80::/10',
+        ],
+        'outboundTag': 'direct',
+      },
+    ];
+
     config['routing'] = {
-      // Jangan paksa Xray menyelesaikan domain untuk pencocokan aturan.
-      // Domain hasil sniffing diteruskan apa adanya ke server.
       'domainStrategy': 'AsIs',
-      'rules': [
-        {'type': 'field', 'port': '53', 'outboundTag': 'direct'},
-        {
-          'type': 'field',
-          'ip': [
-            '10.0.0.0/8',
-            '172.16.0.0/12',
-            '192.168.0.0/16',
-            '127.0.0.0/8',
-            '169.254.0.0/16',
-            'fc00::/7',
-            'fe80::/10',
-          ],
-          'outboundTag': 'direct',
-        },
-      ],
+      'rules': rules,
       'balancers': <dynamic>[],
     };
   }
 
   static void _applyDns(Map<String, dynamic> config) {
     config['dns'] = {
-      'servers': ['8.8.8.8', '1.1.1.1'],
+      'servers': const ['8.8.8.8', '1.1.1.1'],
+      'queryStrategy': 'UseIPv4',
+      'tag': 'dns_query',
     };
   }
 
+  static String _proxyTag(Map<String, dynamic> config) {
+    final outbounds = config['outbounds'];
+    if (outbounds is List) {
+      for (final item in outbounds) {
+        if (item is! Map) continue;
+        final protocol = item['protocol']?.toString() ?? '';
+        if (protocol == 'freedom' || protocol == 'blackhole') continue;
+        final tag = item['tag']?.toString();
+        if (tag != null && tag.isNotEmpty) return tag;
+      }
+    }
+    return 'proxy';
+  }
+
   /// Ringkasan konfigurasi yang aman ditampilkan di log.
-  ///
-  /// Tidak pernah memuat id/password/URL lengkap.
-  static String describe(ServerNode node, {String bugHost = ''}) {
-    final map =
-        jsonDecode(build(node, bugHost: bugHost)) as Map<String, dynamic>;
+  static String describe(
+    ServerNode node, {
+    String bugHost = '',
+    bool overrideSni = false,
+    String dnsMode = 'direct',
+  }) {
+    final map = jsonDecode(
+      build(node, bugHost: bugHost, overrideSni: overrideSni, dnsMode: dnsMode),
+    ) as Map<String, dynamic>;
     final outbounds = map['outbounds'];
 
     Map<dynamic, dynamic>? proxy;
@@ -115,18 +180,36 @@ class XrayConfig {
         sni = tls['serverName']?.toString();
         insecure = tls['allowInsecure'] == true;
       }
+      final reality = stream['realitySettings'];
+      if (reality is Map) {
+        sni ??= reality['serverName']?.toString();
+        insecure = insecure || reality['allowInsecure'] == true;
+      }
       final ws = stream['wsSettings'];
       if (ws is Map && ws['headers'] is Map) {
         host = (ws['headers'] as Map)['Host']?.toString();
+      }
+      for (final key in const ['h2Setting', 'httpSettings']) {
+        final settings = stream[key];
+        if (settings is Map && settings['host'] is List) {
+          final list = (settings['host'] as List);
+          if (list.isNotEmpty) host = list.first.toString();
+        }
       }
     }
 
     return '${node.protocol} ${node.endpoint} '
         'net=${network ?? '-'} security=${security ?? '-'} '
-        'sni=${sni ?? '-'} host=${host ?? '-'} insecure=$insecure';
+        'sni=${sni ?? '-'} host=${host ?? '-'} '
+        'sniMode=${overrideSni ? 'bug' : 'asli'} '
+        'insecure=$insecure dns=$dnsMode';
   }
 
-  static void _applyBugHost(Map<String, dynamic> config, String bugHost) {
+  static void _applyBugHost(
+    Map<String, dynamic> config,
+    String bugHost, {
+    required bool overrideSni,
+  }) {
     final outbounds = config['outbounds'];
     if (outbounds is! List) return;
 
@@ -142,15 +225,17 @@ class XrayConfig {
       final stream = item['streamSettings'];
       if (stream is! Map) continue;
 
-      final security = stream['security']?.toString() ?? '';
-      if (security == 'tls' || security == 'xtls') {
-        final tls = _asMap(stream['tlsSettings']);
-        tls['serverName'] = bugHost;
-        stream['tlsSettings'] = tls;
-      } else if (security == 'reality') {
-        final reality = _asMap(stream['realitySettings']);
-        reality['serverName'] = bugHost;
-        stream['realitySettings'] = reality;
+      if (overrideSni) {
+        final security = stream['security']?.toString() ?? '';
+        if (security == 'tls' || security == 'xtls') {
+          final tls = _asMap(stream['tlsSettings']);
+          tls['serverName'] = bugHost;
+          stream['tlsSettings'] = tls;
+        } else if (security == 'reality') {
+          final reality = _asMap(stream['realitySettings']);
+          reality['serverName'] = bugHost;
+          stream['realitySettings'] = reality;
+        }
       }
 
       final network = stream['network']?.toString() ?? '';
@@ -161,9 +246,13 @@ class XrayConfig {
         ws['headers'] = headers;
         stream['wsSettings'] = ws;
       } else if (network == 'http' || network == 'h2') {
-        final http = _asMap(stream['httpSettings']);
-        http['host'] = [bugHost];
-        stream['httpSettings'] = http;
+        for (final key in const ['h2Setting', 'httpSettings']) {
+          if (stream[key] is Map) {
+            final http = _asMap(stream[key]);
+            http['host'] = [bugHost];
+            stream[key] = http;
+          }
+        }
       } else if (network == 'grpc') {
         final grpc = _asMap(stream['grpcSettings']);
         grpc['authority'] = bugHost;
@@ -199,11 +288,14 @@ class XrayConfig {
         final tls = _asMap(stream['tlsSettings']);
         tls['allowInsecure'] = true;
         stream['tlsSettings'] = tls;
+      } else if (security == 'reality') {
+        final reality = _asMap(stream['realitySettings']);
+        reality['allowInsecure'] = true;
+        stream['realitySettings'] = reality;
       }
     }
   }
 
-  /// Menghormati tautan yang memang meminta verifikasi sertifikat dilewati.
   static bool _wantsInsecure(String raw) {
     final lower = raw.toLowerCase();
     return lower.contains('allowinsecure=1') ||
@@ -211,6 +303,22 @@ class XrayConfig {
         lower.contains('"allowinsecure":true') ||
         lower.contains('"allowinsecure":"1"') ||
         lower.contains('skip-cert-verify=true');
+  }
+
+  static bool _isPrivate(InternetAddress address) {
+    final bytes = address.rawAddress;
+    if (address.type == InternetAddressType.IPv4) {
+      return bytes[0] == 10 ||
+          bytes[0] == 127 ||
+          (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+          (bytes[0] == 192 && bytes[1] == 168) ||
+          (bytes[0] == 169 && bytes[1] == 254);
+    }
+    if (bytes.length >= 2) {
+      if ((bytes[0] & 0xFE) == 0xFC) return true;
+      if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;
+    }
+    return false;
   }
 
   static Map<String, dynamic> _asMap(dynamic value) {

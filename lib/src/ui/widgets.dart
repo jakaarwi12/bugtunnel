@@ -277,7 +277,7 @@ Future<void> showBugHostDialog(BuildContext context, AppState state) async {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text(
-              'Dipakai sebagai SNI dan header Host pada server TLS/WS. Kosongkan bila server tidak memerlukannya.',
+              'Default: hanya dipakai sebagai header Host pada server WS/HTTP/gRPC. SNI tidak diubah. Aktifkan "Bug host sebagai SNI" di Pengaturan hanya bila server memang memerlukannya — SNI salah sering membuat TLS gagal.',
               style: TextStyle(
                 color: AppColors.muted,
                 fontSize: 12,

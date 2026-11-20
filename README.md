@@ -7,7 +7,8 @@ Dibangun dengan Flutter/Dart dan `flutter_v2ray` (Xray core). APK di-build oleh 
 ## Fitur
 
 - **Server otomatis** — mengambil beberapa daftar server publik, menguji koneksi TCP, dan memilih ping terendah.
-- **Bug host** — menimpa SNI dan header `Host` pada server TLS/WS/HTTP/gRPC. Kosongkan bila server tidak memerlukannya.
+- **Bug host** — secara default hanya menimpa header `Host` pada server WS/HTTP/gRPC. SNI **tidak** diubah kecuali toggle **Bug host sebagai SNI** diaktifkan. Kosongkan bila server tidak memerlukannya.
+- **DNS otomatis** — setelah core melaporkan `CONNECTED`, aplikasi menguji DNS lewat SOCKS5 Xray. Bila gagal, aplikasi otomatis mencoba mode DNS lain. Toggle **DNS lewat server** tersedia di Pengaturan.
 - **Failover** — bila server terpilih gagal, aplikasi mencoba hingga tiga server terbaik berikutnya, termasuk percobaan **tanpa bug host** bila bug host membuat koneksi gagal.
 - **Log koneksi** — tab **Log** menampilkan detail pemuatan server, hasil ping, tes server, status Xray, dan error. Semua log bisa disalin atau ditambah dengan log sistem (logcat).
 - **Daftar server** — lihat semua server, ping, pilih manual, atau muat ulang.
@@ -26,9 +27,11 @@ Saat pertama kali menyambung, Android akan menampilkan dialog izin VPN. Ini waji
 
 ## Bug host itu apa?
 
-Bug host adalah nama host yang dipakai sebagai **SNI** dan/atau header **Host** saat berkomunikasi dengan server. Sebagian server gratis memakai trik ini agar koneksi terlihat menuju host lain (misalnya host layanan yang tidak dihitung kuotanya oleh operator).
+Bug host adalah nama host yang dipakai sebagai header **Host** (dan opsional **SNI**) saat berkomunikasi dengan server. Sebagian server gratis memakai trik ini agar koneksi terlihat menuju host lain (misalnya host layanan yang tidak dihitung kuotanya oleh operator).
 
-BugTunnel hanya mengganti nilai SNI/Host pada konfigurasi yang memang memakai TLS/WS/HTTP/gRPC. Kalau server tidak memakai TLS, bug host tidak berpengaruh. Isi tanpa `https://`, misalnya:
+Mulai v1.0.3, BugTunnel **hanya mengganti header Host** secara default. SNI dibiarkan sesuai konfigurasi server karena mengganti SNI ke host lain sering membuat handshake TLS gagal. Jika server memang mengharuskan SNI ikut diganti, aktifkan **Pengaturan → Bug host sebagai SNI**.
+
+Isi tanpa `https://`, misalnya:
 
 ```
 bug.example.com
@@ -93,7 +96,8 @@ lib/
       link_parser.dart      # vmess/vless/trojan/ss + base64 + JSON
       server_source.dart    # fetch daftar publik
       latency.dart          # ping TCP
-      xray_config.dart      # konfigurasi Xray + override bug host
+      xray_config.dart      # konfigurasi Xray + bug host/SNI + routing DNS
+      dns_probe.dart        # uji DNS lewat SOCKS5 Xray
       update_service.dart   # GitHub Releases API
     ui/
       root_shell.dart
@@ -110,17 +114,20 @@ tool/
 
 - Hanya Android (paket `flutter_v2ray` tidak mendukung iOS/desktop).
 - Tes ping memakai koneksi TCP, bukan handshake proxy penuh. Server bisa terlihat hidup tetapi tetap gagal saat dipakai; tes `generate_204` dan failover menangani kasus ini.
-- Bug host hanya menimpa SNI/Host. Tidak ada manipulasi payload, DNS, atau kuota operator.
+- Bug host hanya menimpa Host (dan SNI bila diaktifkan). Tidak ada manipulasi payload atau kuota operator.
+- Node VLESS tanpa TLS ke IP publik dilewati karena ditolak Xray. Tampil sebagai peringatan di log, bukan error fatal.
 - Aplikasi tidak menyediakan server, akun, atau langganan.
 
 ## Troubleshooting
 
-**Tersambung tetapi Chrome/YouTube tidak bisa internet**
+**Tersambung tetapi Chrome/YouTube tidak bisa internet (mis. `ping 8.8.8.8` lolos, `ping google.com` gagal)**
 
-1. Buka tab **Log**, tekan **Tes server terpilih**. Kalau tes gagal, server memang tidak bisa meneruskan trafik.
-2. Kosongkan **Bug host**, lalu coba sambung lagi. Aplikasi juga otomatis mencoba tanpa bug host bila bug host gagal.
-3. Set **Private DNS** Android ke **Off** atau **Automatic**.
-4. Muat ulang daftar server; server publik sering mati.
+1. Buka tab **Log**, tekan **Hapus log**, lalu **Tes server terpilih**.
+2. Kosongkan **Bug host** dan pastikan **Bug host sebagai SNI nonaktif**, lalu sambung lagi. Aplikasi juga otomatis mencoba tanpa bug host.
+3. Perhatikan baris `DNS ...`. Bila tertulis `DNS gagal`, aktifkan **Pengaturan → DNS lewat server** (atau biarkan aplikasi mencoba otomatis saat connecting).
+4. Set **Private DNS** Android ke **Off** atau **Automatic**.
+5. Muat ulang daftar server; server publik sering mati.
+6. Salin log lewat **Salin semua** bila masih gagal.
 
 **Semua server gagal**
 

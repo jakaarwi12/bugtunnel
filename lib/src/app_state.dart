@@ -10,6 +10,7 @@ import 'package:url_launcher/url_launcher.dart';
 
 import 'models.dart';
 import 'log.dart';
+import 'services/dns_probe.dart';
 import 'services/latency.dart';
 import 'services/server_source.dart';
 import 'services/update_service.dart';
@@ -18,15 +19,27 @@ import 'services/xray_config.dart';
 enum TunnelState { disconnected, connecting, connected, disconnecting }
 
 class _Attempt {
-  const _Attempt(this.node, this.host, this.mode);
+  const _Attempt(
+    this.node,
+    this.host,
+    this.mode, {
+    this.sni = false,
+    this.dns = 'direct',
+  });
 
   final ServerNode node;
   final String host;
   final String mode;
+  final bool sni;
+  final String dns;
 }
+
+enum _ConnectOutcome { connected, failed, dnsFailed }
 
 class AppState extends ChangeNotifier {
   static const _kBugHost = 'bug_host';
+  static const _kBugHostSni = 'bug_host_sni';
+  static const _kDnsMode = 'dns_mode';
   static const _kSources = 'sources';
   static const _kAutoSelect = 'auto_select';
   static const _kAutoUpdate = 'auto_update';
@@ -40,6 +53,8 @@ class AppState extends ChangeNotifier {
   static const int _maxLogs = 800;
 
   String bugHost = '';
+  bool bugHostSni = false;
+  String dnsMode = 'direct';
   List<String> sources = List<String>.from(ServerSource.defaults);
   bool autoSelect = true;
   bool autoUpdate = true;
@@ -56,6 +71,7 @@ class AppState extends ChangeNotifier {
   String appVersion = '1.0.0';
   String appBuild = '1';
   bool checkingUpdate = false;
+  bool _dnsFallbackDone = false;
   ReleaseInfo? update;
   bool updatePromptPending = false;
 
@@ -105,6 +121,8 @@ class AppState extends ChangeNotifier {
       ..writeln('BugTunnel $appVersion ($appBuild)')
       ..writeln('Android: ${Platform.operatingSystemVersion}')
       ..writeln('Bug host: ${bugHost.isEmpty ? 'tidak diisi' : bugHost}')
+      ..writeln('Ganti SNI: ${bugHostSni ? 'ya' : 'tidak'}')
+      ..writeln('Mode DNS: $dnsMode')
       ..writeln('Sumber server: ${sources.length}')
       ..writeln('Server terpilih: ${selected?.name ?? '-'}')
       ..writeln('----------------------------------------');
@@ -129,15 +147,24 @@ class AppState extends ChangeNotifier {
         '500',
       ]).timeout(const Duration(seconds: 6));
       final text = '${result.stdout}';
+      const noise = [
+        'apkassets',
+        'bufferqueueproducer',
+        'nativeloader',
+        'imetacker',
+        'profileinstaller',
+        'vulkan',
+      ];
       final lines = text
           .split('\n')
           .where((line) {
             final lower = line.toLowerCase();
+            if (noise.any((word) => lower.contains(word))) return false;
             return lower.contains('v2ray') ||
                 lower.contains('xray') ||
                 lower.contains('tun2socks') ||
                 lower.contains('vpn_service') ||
-                lower.contains('bugtunnel');
+                lower.contains('aarwi.bugtunnel');
           })
           .take(150)
           .toList();
@@ -162,12 +189,20 @@ class AppState extends ChangeNotifier {
   Future<void> init() async {
     _prefs = await SharedPreferences.getInstance();
     bugHost = _prefs.getString(_kBugHost) ?? '';
+    bugHostSni = _prefs.getBool(_kBugHostSni) ?? false;
+    dnsMode = _prefs.getString(_kDnsMode) == 'proxy' ? 'proxy' : 'direct';
     autoSelect = _prefs.getBool(_kAutoSelect) ?? true;
     autoUpdate = _prefs.getBool(_kAutoUpdate) ?? true;
 
     final storedSources = _prefs.getStringList(_kSources);
     if (storedSources != null && storedSources.isNotEmpty) {
-      sources = storedSources;
+      final cleaned = _extractUrls(storedSources);
+      sources = cleaned.isEmpty
+          ? List<String>.from(ServerSource.defaults)
+          : cleaned;
+      if (cleaned.length != storedSources.length) {
+        await _prefs.setStringList(_kSources, sources);
+      }
     }
 
     _restoreCache();
@@ -184,6 +219,10 @@ class AppState extends ChangeNotifier {
     addLog(
       LogLevel.info,
       'Bug host: ${bugHost.isEmpty ? 'tidak diisi' : bugHost}',
+    );
+    addLog(
+      LogLevel.info,
+      'Bug host sebagai SNI: ${bugHostSni ? 'ya' : 'tidak'}, DNS: $dnsMode',
     );
     addLog(LogLevel.info, 'Sumber server: ${sources.length}');
 
@@ -377,6 +416,34 @@ class AppState extends ChangeNotifier {
     return value;
   }
 
+  /// Mengambil hanya URL http(s) dari teks yang mungkin berisi banyak baris.
+  ///
+  /// Pengguna kadang menempel seluruh isi langganan ke kolom sumber. Tanpa
+  /// pembersihan, setiap baris seperti `Hostname: ...` dianggap sebagai URL.
+  static List<String> _extractUrls(Iterable<String> input) {
+    final pattern = RegExp("https?://[^\\s<>\"']+");
+    final result = <String>[];
+    final seen = <String>{};
+    for (final line in input) {
+      for (final match in pattern.allMatches(line)) {
+        var url = match.group(0)!;
+        while (url.endsWith(',') ||
+            url.endsWith('.') ||
+            url.endsWith(';') ||
+            url.endsWith(')') ||
+            url.endsWith(']')) {
+          url = url.substring(0, url.length - 1);
+        }
+        final uri = Uri.tryParse(url);
+        if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+          continue;
+        }
+        if (seen.add(url)) result.add(url);
+      }
+    }
+    return result;
+  }
+
   Future<void> testSelectedServer() async {
     final node = selected;
     if (node == null) {
@@ -398,11 +465,17 @@ class AppState extends ChangeNotifier {
 
     addLog(LogLevel.info, 'Tes manual server ${node.name}');
     final withBug = await _probe(
-      _Attempt(node, bugHost, bugHost.isEmpty ? 'bawaan' : 'bug host'),
+      _Attempt(
+        node,
+        bugHost,
+        bugHost.isEmpty ? 'bawaan' : 'bug host',
+        sni: bugHostSni,
+        dns: dnsMode,
+      ),
     );
     if (!withBug && bugHost.isNotEmpty) {
       addLog(LogLevel.info, 'Mencoba tes ulang tanpa bug host...');
-      await _probe(_Attempt(node, '', 'tanpa bug host'));
+      await _probe(_Attempt(node, '', 'tanpa bug host', dns: dnsMode));
     }
   }
 
@@ -413,14 +486,21 @@ class AppState extends ChangeNotifier {
     }
     if (!autoSelect && selected != null) {
       for (final node in servers) {
-        if (node.id == selected!.id) {
+        if (node.id == selected!.id &&
+            XrayConfig.validationError(node) == null) {
           selected = node;
           return;
         }
       }
     }
     for (final node in servers) {
-      if (node.alive) {
+      if (node.alive && XrayConfig.validationError(node) == null) {
+        selected = node;
+        return;
+      }
+    }
+    for (final node in servers) {
+      if (XrayConfig.validationError(node) == null) {
         selected = node;
         return;
       }
@@ -498,9 +578,35 @@ class AppState extends ChangeNotifier {
       final attempts = _buildAttempts(candidates);
       addLog(LogLevel.info, '${attempts.length} percobaan disiapkan');
 
+      _dnsFallbackDone = false;
       final ordered = await _prioritize(attempts);
       for (final attempt in ordered) {
-        if (await _tryConnect(attempt)) return;
+        final outcome = await _tryConnect(attempt);
+        if (outcome == _ConnectOutcome.connected) return;
+        if (outcome == _ConnectOutcome.dnsFailed && !_dnsFallbackDone) {
+          _dnsFallbackDone = true;
+          final flipped = attempt.dns == 'proxy' ? 'direct' : 'proxy';
+          addLog(
+            LogLevel.info,
+            'DNS gagal dengan mode ${attempt.dns}, mencoba mode $flipped...',
+          );
+          final retry = await _tryConnect(
+            _Attempt(
+              attempt.node,
+              attempt.host,
+              '${attempt.mode} • DNS $flipped',
+              sni: attempt.sni,
+              dns: flipped,
+            ),
+          );
+          if (retry == _ConnectOutcome.connected) {
+            addLog(
+              LogLevel.success,
+              'Mode DNS $flipped berhasil. Simpan di Pengaturan untuk permanen.',
+            );
+            return;
+          }
+        }
       }
       lastError =
           'Semua server gagal terhubung. Coba muat ulang daftar server.';
@@ -525,10 +631,23 @@ class AppState extends ChangeNotifier {
     final attempts = <_Attempt>[];
     for (final node in candidates) {
       if (bugHost.isNotEmpty) {
-        attempts.add(_Attempt(node, bugHost, 'bug host'));
+        attempts.add(
+          _Attempt(
+            node,
+            bugHost,
+            bugHostSni ? 'bug host (SNI)' : 'bug host (Host)',
+            sni: bugHostSni,
+            dns: dnsMode,
+          ),
+        );
       }
       attempts.add(
-        _Attempt(node, '', bugHost.isEmpty ? 'bawaan' : 'tanpa bug host'),
+        _Attempt(
+          node,
+          '',
+          bugHost.isEmpty ? 'bawaan' : 'tanpa bug host',
+          dns: dnsMode,
+        ),
       );
       if (attempts.length >= 4) break;
     }
@@ -536,8 +655,18 @@ class AppState extends ChangeNotifier {
   }
 
   List<ServerNode> _connectCandidates() {
-    final alive = servers.where((node) => node.alive).toList();
-    final pool = alive.isNotEmpty ? alive : servers;
+    final usable = servers.where(
+      (node) => XrayConfig.validationError(node) == null,
+    );
+    final alive = usable.where((node) => node.alive).toList();
+    final pool = alive.isNotEmpty ? alive : usable.toList();
+    final skipped = servers.length - usable.length;
+    if (skipped > 0) {
+      addLog(
+        LogLevel.warning,
+        '$skipped server dilewati karena konfigurasinya ditolak Xray',
+      );
+    }
     final ordered = <ServerNode>[];
 
     final current = selected;
@@ -566,8 +695,18 @@ class AppState extends ChangeNotifier {
     final core = _core;
     if (core == null) return false;
     addLog(LogLevel.info, 'Tes ${attempt.node.name} (${attempt.mode})...');
+    final invalid = XrayConfig.validationError(attempt.node);
+    if (invalid != null) {
+      addLog(LogLevel.warning, 'Tes dilewati: $invalid');
+      return false;
+    }
     try {
-      final config = XrayConfig.build(attempt.node, bugHost: attempt.host);
+      final config = XrayConfig.build(
+        attempt.node,
+        bugHost: attempt.host,
+        overrideSni: attempt.sni,
+        dnsMode: attempt.dns,
+      );
       final delay = await core
           .getServerDelay(
             config: config,
@@ -611,21 +750,34 @@ class AppState extends ChangeNotifier {
     return [...passed, ...failed, ...attempts.skip(2)];
   }
 
-  Future<bool> _tryConnect(_Attempt attempt) async {
+  Future<_ConnectOutcome> _tryConnect(_Attempt attempt) async {
     final node = attempt.node;
     selected = node;
     tunnel = TunnelState.connecting;
     notice = 'Mencoba ${node.name}...';
     addLog(LogLevel.info, 'Mencoba ${node.name} (${attempt.mode})');
     try {
-      addLog(LogLevel.info, XrayConfig.describe(node, bugHost: attempt.host));
+      addLog(
+        LogLevel.info,
+        XrayConfig.describe(
+          node,
+          bugHost: attempt.host,
+          overrideSni: attempt.sni,
+          dnsMode: attempt.dns,
+        ),
+      );
     } catch (error) {
       addLog(LogLevel.warning, 'Ringkasan konfigurasi gagal: $error');
     }
     _notify();
 
     try {
-      final config = XrayConfig.build(node, bugHost: attempt.host);
+      final config = XrayConfig.build(
+        node,
+        bugHost: attempt.host,
+        overrideSni: attempt.sni,
+        dnsMode: attempt.dns,
+      );
       await _core!.startV2Ray(
         remark: 'BugTunnel • ${node.name}',
         config: config,
@@ -644,7 +796,26 @@ class AppState extends ChangeNotifier {
             LogLevel.success,
             'Terhubung ke ${node.name} (${attempt.mode})',
           );
-          return true;
+
+          // Core CONNECTED belum menjamin aplikasi bisa internet. Uji DNS
+          // lewat jalur yang sama dengan tun2socks (SOCKS 127.0.0.1:1080).
+          final dns = await DnsProbe.check();
+          if (dns.ok == true) {
+            addLog(LogLevel.success, 'DNS ${dns.message}');
+          } else if (dns.ok == false) {
+            addLog(
+              LogLevel.warning,
+              'DNS gagal: ${dns.message}. Coba mode DNS lain...',
+            );
+            await _core!.stopV2Ray();
+            tunnel = TunnelState.disconnected;
+            connectedSince = null;
+            _stopTicker();
+            return _ConnectOutcome.dnsFailed;
+          } else {
+            addLog(LogLevel.info, 'DNS tidak bisa diuji: ${dns.message}');
+          }
+          return _ConnectOutcome.connected;
         }
       }
 
@@ -654,7 +825,7 @@ class AppState extends ChangeNotifier {
       );
       await _core!.stopV2Ray();
       _markDead(node);
-      return false;
+      return _ConnectOutcome.failed;
     } catch (error) {
       _markDead(node);
       lastError = '${node.name} gagal: $error';
@@ -664,7 +835,7 @@ class AppState extends ChangeNotifier {
       } catch (_) {
         // Abaikan kegagalan saat membersihkan koneksi.
       }
-      return false;
+      return _ConnectOutcome.failed;
     }
   }
 
@@ -701,22 +872,47 @@ class AppState extends ChangeNotifier {
     _prefs.setString(_kBugHost, bugHost);
     addLog(
       LogLevel.info,
-      'Bug host diubah: ${bugHost.isEmpty ? 'dikosongkan' : bugHost}',
+      'Bug host diubah: ${bugHost.isEmpty ? 'dikosongkan' : bugHost} '
+      '(SNI: ${bugHostSni ? 'ya' : 'tidak'})',
+    );
+    _notify();
+  }
+
+  Future<void> setBugHostSni(bool value) async {
+    bugHostSni = value;
+    await _prefs.setBool(_kBugHostSni, value);
+    addLog(
+      LogLevel.warning,
+      bugHostSni
+          ? 'Bug host juga dipakai sebagai SNI (bisa membuat TLS gagal)'
+          : 'Bug host hanya dipakai sebagai header Host',
+    );
+    _notify();
+  }
+
+  Future<void> setDnsMode(String value) async {
+    dnsMode = value == 'proxy' ? 'proxy' : 'direct';
+    await _prefs.setString(_kDnsMode, dnsMode);
+    addLog(
+      LogLevel.info,
+      'Mode DNS diubah: ${dnsMode == 'proxy' ? 'lewat server' : 'langsung'}',
     );
     _notify();
   }
 
   Future<void> setSources(List<String> value) async {
-    final cleaned = value
-        .map((item) => item.trim())
-        .where((item) => item.isNotEmpty)
-        .toSet()
-        .toList();
+    final cleaned = _extractUrls(value);
     sources = cleaned.isEmpty
         ? List<String>.from(ServerSource.defaults)
         : cleaned;
     await _prefs.setStringList(_kSources, sources);
-    addLog(LogLevel.info, 'Sumber server diubah: ${sources.length} URL');
+    final nonEmpty = value.where((item) => item.trim().isNotEmpty).length;
+    final dropped = nonEmpty > cleaned.length ? nonEmpty - cleaned.length : 0;
+    addLog(
+      LogLevel.info,
+      'Sumber server diubah: ${sources.length} URL'
+      '${dropped > 0 ? ' ($dropped baris bukan URL dibuang)' : ''}',
+    );
     _notify();
   }
 
@@ -802,6 +998,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> resetSettings() async {
     bugHost = '';
+    bugHostSni = false;
+    dnsMode = 'direct';
     sources = List<String>.from(ServerSource.defaults);
     autoSelect = true;
     autoUpdate = true;
@@ -813,6 +1011,8 @@ class AppState extends ChangeNotifier {
     update = null;
 
     await _prefs.remove(_kBugHost);
+    await _prefs.remove(_kBugHostSni);
+    await _prefs.remove(_kDnsMode);
     await _prefs.remove(_kSources);
     await _prefs.remove(_kAutoSelect);
     await _prefs.remove(_kAutoUpdate);

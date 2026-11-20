@@ -49,6 +49,26 @@ class SettingsPage extends StatelessWidget {
                   ),
                   const Divider(),
                   _SwitchRow(
+                    icon: Icons.public_rounded,
+                    title: 'Bug host sebagai SNI',
+                    subtitle: 'Nonaktif: aman. Aktif: SNI ikut diganti',
+                    value: state.bugHostSni,
+                    onChanged: (value) {
+                      state.setBugHostSni(value);
+                    },
+                  ),
+                  const Divider(),
+                  _SwitchRow(
+                    icon: Icons.dns_outlined,
+                    title: 'DNS lewat server',
+                    subtitle: 'Aktifkan bila DNS langsung tidak menjawab',
+                    value: state.dnsMode == 'proxy',
+                    onChanged: (value) {
+                      state.setDnsMode(value ? 'proxy' : 'direct');
+                    },
+                  ),
+                  const Divider(),
+                  _SwitchRow(
                     icon: Icons.auto_awesome_rounded,
                     title: 'Server otomatis',
                     subtitle: 'Pilih server tercepat saat daftar dimuat',
