@@ -29,3 +29,7 @@ android/key.properties
 
 # Local secrets
 .env
+
+# Python
+__pycache__/
+*.pyc
