@@ -30,11 +30,20 @@ def patch_gradle_kts(path: Path) -> None:
 
     text = text.replace("minSdk = flutter.minSdkVersion", "minSdk = 24")
 
+    # `java` di dalam skrip Gradle menunjuk ke ekstensi Java, bukan paket,
+    # sehingga `java.util.Properties` gagal dikompilasi. Impor harus di atas.
+    if "import java.util.Properties" not in text:
+        text = (
+            "import java.io.FileInputStream\n"
+            "import java.util.Properties\n\n"
+            + text
+        )
+
     if "keystorePropertiesFile" not in text:
-        properties = """val keystoreProperties = java.util.Properties()
+        properties = """val keystoreProperties = Properties()
 val keystorePropertiesFile = rootProject.file("key.properties")
 if (keystorePropertiesFile.exists()) {
-    keystoreProperties.load(java.io.FileInputStream(keystorePropertiesFile))
+    keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 
 """
@@ -154,11 +163,11 @@ def patch_manifest(path: Path) -> None:
         for permission in root.findall("uses-permission")
     }
     wanted = [
-        ("android.permission.INTERNET", None),
-        ("android.permission.ACCESS_NETWORK_STATE", None),
-        ("android.permission.FOREGROUND_SERVICE", None),
-        ("android.permission.FOREGROUND_SERVICE_SPECIAL_USE", "34"),
-        ("android.permission.POST_NOTIFICATIONS", "33"),
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+        "android.permission.POST_NOTIFICATIONS",
     ]
 
     application = root.find("application")
@@ -166,13 +175,10 @@ def patch_manifest(path: Path) -> None:
         fail("AndroidManifest.xml tidak punya elemen <application>.")
 
     index = list(root).index(application)
-    for name, min_sdk in wanted:
+    for name in wanted:
         if name in existing:
             continue
-        attributes = {android("name"): name}
-        if min_sdk:
-            attributes[android("minSdkVersion")] = min_sdk
-        root.insert(index, ET.Element("uses-permission", attributes))
+        root.insert(index, ET.Element("uses-permission", {android("name"): name}))
         index += 1
 
     application.set(android("label"), "BugTunnel")
