@@ -5,17 +5,72 @@ import 'package:flutter_v2ray/flutter_v2ray.dart';
 import '../models.dart';
 
 class XrayConfig {
-  /// Membangun konfigurasi Xray dari link server, lalu menimpa SNI/header
-  /// Host dengan bug host bila diisi.
+  /// Membangun konfigurasi Xray dari link server.
+  ///
+  /// Selain menimpa SNI/header Host dengan bug host, konfigurasi ini juga
+  /// memperbaiki routing yang dipakai plugin:
+  ///
+  /// - DNS (port 53) dikirim langsung, bukan lewat proxy. Banyak server gratis
+  ///   tidak mendukung UDP, sehingga DNS lewat proxy membuat aplikasi seperti
+  ///   Chrome dan YouTube seolah "tidak ada internet" walau ping ke IP jalan.
+  /// - Alamat privat/LAN tetap langsung agar tidak dipaksa lewat server.
+  /// - Sniffing diaktifkan supaya domain tujuan terbaca.
   static String build(ServerNode node, {String bugHost = ''}) {
     final parser = parseV2RayURL(node.raw);
     final map =
         jsonDecode(parser.getFullConfiguration()) as Map<String, dynamic>;
     final host = bugHost.trim();
+
+    _enableSniffing(map);
+    _applyRouting(map);
+
     if (host.isNotEmpty) {
       _applyBugHost(map, host);
+      // SNI diganti, jadi sertifikat server tidak akan cocok dengan nama host
+      // baru. Tanpa ini, TLS gagal dan semua koneksi mati.
+      _setAllowInsecure(map);
+    } else if (_wantsInsecure(node.raw)) {
+      _setAllowInsecure(map);
     }
+
     return jsonEncode(map);
+  }
+
+  static void _enableSniffing(Map<String, dynamic> config) {
+    final inbounds = config['inbounds'];
+    if (inbounds is! List) return;
+    for (final item in inbounds) {
+      if (item is! Map) continue;
+      item['sniffing'] = {
+        'enabled': true,
+        'destOverride': ['http', 'tls'],
+        'metadataOnly': false,
+        'routeOnly': false,
+      };
+    }
+  }
+
+  static void _applyRouting(Map<String, dynamic> config) {
+    config['routing'] = {
+      'domainStrategy': 'IPIfNonMatch',
+      'rules': [
+        {'type': 'field', 'port': '53', 'outboundTag': 'direct'},
+        {
+          'type': 'field',
+          'ip': [
+            '10.0.0.0/8',
+            '172.16.0.0/12',
+            '192.168.0.0/16',
+            '127.0.0.0/8',
+            '169.254.0.0/16',
+            'fc00::/7',
+            'fe80::/10',
+          ],
+          'outboundTag': 'direct',
+        },
+      ],
+      'balancers': <dynamic>[],
+    };
   }
 
   static void _applyBugHost(Map<String, dynamic> config, String bugHost) {
@@ -77,6 +132,32 @@ class XrayConfig {
         }
       }
     }
+  }
+
+  static void _setAllowInsecure(Map<String, dynamic> config) {
+    final outbounds = config['outbounds'];
+    if (outbounds is! List) return;
+    for (final item in outbounds) {
+      if (item is! Map) continue;
+      final stream = item['streamSettings'];
+      if (stream is! Map) continue;
+      final security = stream['security']?.toString() ?? '';
+      if (security == 'tls' || security == 'xtls') {
+        final tls = _asMap(stream['tlsSettings']);
+        tls['allowInsecure'] = true;
+        stream['tlsSettings'] = tls;
+      }
+    }
+  }
+
+  /// Menghormati tautan yang memang meminta verifikasi sertifikat dilewati.
+  static bool _wantsInsecure(String raw) {
+    final lower = raw.toLowerCase();
+    return lower.contains('allowinsecure=1') ||
+        lower.contains('allowinsecure=true') ||
+        lower.contains('"allowinsecure":true') ||
+        lower.contains('"allowinsecure":"1"') ||
+        lower.contains('skip-cert-verify=true');
   }
 
   static Map<String, dynamic> _asMap(dynamic value) {

@@ -316,7 +316,8 @@ class AppState extends ChangeNotifier {
         return;
       }
 
-      for (final node in candidates) {
+      final ordered = await _prioritize(candidates);
+      for (final node in ordered) {
         if (await _tryConnect(node)) return;
       }
       lastError =
@@ -355,6 +356,44 @@ class AppState extends ChangeNotifier {
       if (!ordered.any((item) => item.id == node.id)) ordered.add(node);
     }
     return ordered;
+  }
+
+  /// Menguji apakah server benar-benar bisa meneruskan trafik.
+  ///
+  /// Ping TCP hanya membuktikan port terbuka. Banyak server gratis menerima
+  /// koneksi tetapi tidak bisa keluar ke internet. `getServerDelay` memakai
+  /// core Xray untuk mengambil URL lewat server tersebut.
+  Future<bool> _probe(ServerNode node) async {
+    final core = _core;
+    if (core == null) return false;
+    try {
+      final config = XrayConfig.build(node, bugHost: bugHost);
+      final delay = await core
+          .getServerDelay(
+            config: config,
+            url: 'https://www.gstatic.com/generate_204',
+          )
+          .timeout(const Duration(seconds: 6), onTimeout: () => -1);
+      return delay > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Menaruh server yang lolos tes nyata di depan, tanpa membuang kandidat lain.
+  Future<List<ServerNode>> _prioritize(List<ServerNode> candidates) async {
+    if (candidates.length <= 1) return candidates;
+
+    final passed = <ServerNode>[];
+    final failed = <ServerNode>[];
+    for (final node in candidates.take(2)) {
+      if (await _probe(node)) {
+        passed.add(node);
+      } else {
+        failed.add(node);
+      }
+    }
+    return [...passed, ...failed, ...candidates.skip(2)];
   }
 
   Future<bool> _tryConnect(ServerNode node) async {
