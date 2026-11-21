@@ -80,6 +80,16 @@ class SettingsPage extends StatelessWidget {
                   ),
                   const Divider(),
                   _SwitchRow(
+                    icon: Icons.verified_user_outlined,
+                    title: 'Izinkan TLS insecure',
+                    subtitle: 'Lewati verifikasi sertifikat server gratis (kurang aman)',
+                    value: state.allowInsecure,
+                    onChanged: (value) {
+                      state.setAllowInsecure(value);
+                    },
+                  ),
+                  const Divider(),
+                  _SwitchRow(
                     icon: Icons.sports_esports_rounded,
                     title: 'Mode Game 🎮',
                     subtitle: 'Hanya aplikasi terpilih yang lewat tunnel',

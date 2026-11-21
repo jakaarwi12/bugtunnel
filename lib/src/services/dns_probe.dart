@@ -18,6 +18,10 @@ class DnsProbeResult {
 ///
 /// Ini meniru jalur yang dipakai aplikasi lain: DNS diarahkan ke 8.8.8.8:53
 /// dan diproses sesuai aturan routing Xray (langsung atau lewat proxy).
+///
+/// Perhatian: dengan mode DNS `direct`, balasan berasal dari jaringan Android,
+/// bukan dari server. Untuk memastikan tunnel bisa internet, pakai
+/// [TunnelProbe.check] dari `tunnel_probe.dart`.
 class DnsProbe {
   static const int _socksPort = 1080;
 

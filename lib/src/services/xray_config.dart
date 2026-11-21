@@ -22,6 +22,7 @@ class XrayConfig {
     bool overrideSni = false,
     String dnsMode = 'direct',
     List<String> dnsServers = const ['8.8.8.8', '1.1.1.1'],
+    bool allowInsecure = false,
   }) {
     final parser = parseV2RayURL(node.raw);
     final map =
@@ -34,11 +35,13 @@ class XrayConfig {
 
     if (host.isNotEmpty) {
       _applyBugHost(map, host, overrideSni: overrideSni);
-      if (overrideSni) {
-        // SNI diganti, jadi sertifikat server tidak akan cocok.
-        _setAllowInsecure(map);
-      }
-    } else if (_wantsInsecure(node.raw)) {
+    }
+
+    // SNI bug membuat sertifikat tidak cocok. Link juga bisa menanam
+    // allowInsecure, dan pengguna bisa memaksanya lewat pengaturan.
+    if (allowInsecure ||
+        (host.isNotEmpty && overrideSni) ||
+        _wantsInsecure(node.raw)) {
       _setAllowInsecure(map);
     }
 
@@ -189,6 +192,7 @@ class XrayConfig {
     bool overrideSni = false,
     String dnsMode = 'direct',
     List<String> dnsServers = const ['8.8.8.8', '1.1.1.1'],
+    bool allowInsecure = false,
   }) {
     final map = jsonDecode(
       build(
@@ -197,6 +201,7 @@ class XrayConfig {
         overrideSni: overrideSni,
         dnsMode: dnsMode,
         dnsServers: dnsServers,
+        allowInsecure: allowInsecure,
       ),
     ) as Map<String, dynamic>;
     final outbounds = map['outbounds'];
