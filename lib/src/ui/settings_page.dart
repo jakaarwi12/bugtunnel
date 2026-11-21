@@ -68,6 +68,39 @@ class SettingsPage extends StatelessWidget {
                     },
                   ),
                   const Divider(),
+                  _SettingRow(
+                    icon: Icons.dns_rounded,
+                    title: 'Resolver DNS',
+                    subtitle: state.dnsServerLabel,
+                    onTap: () => showDnsServerDialog(context, state),
+                    trailing: const Icon(
+                      Icons.chevron_right_rounded,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                  const Divider(),
+                  _SwitchRow(
+                    icon: Icons.sports_esports_rounded,
+                    title: 'Mode Game 🎮',
+                    subtitle: 'Hanya aplikasi terpilih yang lewat tunnel',
+                    value: state.gameMode,
+                    onChanged: (value) {
+                      state.setGameMode(value);
+                    },
+                  ),
+                  const Divider(),
+                  _SettingRow(
+                    icon: Icons.apps_rounded,
+                    title: 'Aplikasi yang diizinkan',
+                    subtitle:
+                        '${state.allowedApps.length} aplikasi dipilih · berlaku saat Mode Game aktif',
+                    onTap: () => showAllowedAppsDialog(context, state),
+                    trailing: const Icon(
+                      Icons.chevron_right_rounded,
+                      color: AppColors.muted,
+                    ),
+                  ),
+                  const Divider(),
                   _SwitchRow(
                     icon: Icons.auto_awesome_rounded,
                     title: 'Server otomatis',
@@ -170,7 +203,7 @@ class SettingsPage extends StatelessWidget {
                   _SettingRow(
                     icon: Icons.delete_outline_rounded,
                     title: 'Reset pengaturan',
-                    subtitle: 'Hapus bug host, sumber, dan cache server',
+                    subtitle: 'Hapus bug host, sumber, DNS, Mode Game, dan cache server',
                     onTap: () => _confirmReset(context),
                     trailing: const Icon(
                       Icons.chevron_right_rounded,
@@ -222,7 +255,7 @@ class SettingsPage extends StatelessWidget {
         return AlertDialog(
           title: const Text('Reset pengaturan?'),
           content: const Text(
-            'Bug host, sumber server, dan cache server akan dihapus. Tindakan ini tidak bisa dibatalkan.',
+            'Bug host, sumber server, resolver DNS, Mode Game, daftar aplikasi yang diizinkan, dan cache server akan dihapus. Tindakan ini tidak bisa dibatalkan.',
           ),
           actions: [
             TextButton(

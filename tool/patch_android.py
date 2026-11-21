@@ -167,6 +167,7 @@ def patch_manifest(path: Path) -> None:
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.FOREGROUND_SERVICE",
         "android.permission.FOREGROUND_SERVICE_SPECIAL_USE",
+        "android.permission.QUERY_ALL_PACKAGES",
         "android.permission.POST_NOTIFICATIONS",
     ]
 

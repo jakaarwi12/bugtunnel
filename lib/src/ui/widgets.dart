@@ -1,3 +1,4 @@
+import 'package:device_apps/device_apps.dart';
 import 'package:flutter/material.dart';
 
 import '../app_state.dart';
@@ -370,4 +371,242 @@ Future<void> showSourcesDialog(BuildContext context, AppState state) async {
         .toList();
     await state.setSources(lines);
   }
+}
+
+Future<void> showDnsServerDialog(BuildContext context, AppState state) async {
+  var selected = state.dnsServer;
+  final result = await showDialog<String>(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setLocalState) {
+          return AlertDialog(
+            title: const Text('Resolver DNS'),
+            content: SizedBox(
+              width: 420,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Resolver dipakai Xray saat menyambung dan saat tes DNS. Pilih otomatis untuk mencoba 8.8.8.8 lalu 1.1.1.1.',
+                    style: TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 12,
+                      height: 1.45,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  RadioGroup<String>(
+                    groupValue: selected,
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setLocalState(() {
+                        selected = value;
+                      });
+                    },
+                    child: const Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        RadioListTile<String>(
+                          value: 'auto',
+                          contentPadding: EdgeInsets.zero,
+                          title: Text('Otomatis'),
+                          subtitle: Text('8.8.8.8 + 1.1.1.1'),
+                        ),
+                        RadioListTile<String>(
+                          value: 'google',
+                          contentPadding: EdgeInsets.zero,
+                          title: Text('Google'),
+                          subtitle: Text('8.8.8.8'),
+                        ),
+                        RadioListTile<String>(
+                          value: 'cloudflare',
+                          contentPadding: EdgeInsets.zero,
+                          title: Text('Cloudflare'),
+                          subtitle: Text('1.1.1.1'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Batal'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, selected),
+                child: const Text('Simpan'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+  if (result == null) return;
+  if (!context.mounted) return;
+  await state.setDnsServer(result);
+}
+
+Future<void> showAllowedAppsDialog(BuildContext context, AppState state) async {
+  final future = DeviceApps.getInstalledApplications(
+    includeSystemApps: false,
+    onlyAppsWithLaunchIntent: true,
+  );
+  final selected = state.allowedApps.toSet();
+  final searchController = TextEditingController();
+  var query = '';
+  final result = await showDialog<Set<String>>(
+    context: context,
+    builder: (context) {
+      return StatefulBuilder(
+        builder: (context, setLocalState) {
+          return AlertDialog(
+            title: const Text('Aplikasi yang diizinkan'),
+            content: SizedBox(
+              width: 460,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Hanya aplikasi terpilih yang lewat tunnel saat Mode Game aktif. Aplikasi lain memakai koneksi biasa.',
+                    style: TextStyle(
+                      color: AppColors.muted,
+                      fontSize: 12,
+                      height: 1.45,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: searchController,
+                    onChanged: (value) {
+                      setLocalState(() {
+                        query = value;
+                      });
+                    },
+                    decoration: const InputDecoration(
+                      hintText: 'Cari aplikasi atau package',
+                      prefixIcon: Icon(Icons.search_rounded),
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 320,
+                    child: FutureBuilder<List<Application>>(
+                      future: future,
+                      builder: (context, snapshot) {
+                        if (snapshot.connectionState != ConnectionState.done) {
+                          return const Center(
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppColors.accent,
+                            ),
+                          );
+                        }
+                        if (snapshot.hasError) {
+                          return const Center(
+                            child: Text(
+                              'Gagal membaca daftar aplikasi terpasang.',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: AppColors.danger,
+                                fontSize: 12,
+                              ),
+                            ),
+                          );
+                        }
+                        final needle = query.trim().toLowerCase();
+                        final apps =
+                            (snapshot.data ?? const <Application>[]).where((
+                              app,
+                            ) {
+                              if (needle.isEmpty) return true;
+                              final name = app.appName.toLowerCase();
+                              final package = app.packageName.toLowerCase();
+                              return name.contains(needle) ||
+                                  package.contains(needle);
+                            }).toList()..sort(
+                              (a, b) => a.appName.toLowerCase().compareTo(
+                                b.appName.toLowerCase(),
+                              ),
+                            );
+                        if (apps.isEmpty) {
+                          return const Center(
+                            child: Text(
+                              'Tidak ada aplikasi yang cocok.',
+                              style: TextStyle(
+                                color: AppColors.muted,
+                                fontSize: 12,
+                              ),
+                            ),
+                          );
+                        }
+                        return ListView.builder(
+                          itemCount: apps.length,
+                          itemBuilder: (context, index) {
+                            final app = apps[index];
+                            final checked = selected.contains(app.packageName);
+                            return CheckboxListTile(
+                              dense: true,
+                              contentPadding: EdgeInsets.zero,
+                              controlAffinity: ListTileControlAffinity.leading,
+                              value: checked,
+                              title: Text(
+                                app.appName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              subtitle: Text(
+                                app.packageName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: AppColors.muted,
+                                  fontSize: 10,
+                                ),
+                              ),
+                              onChanged: (value) {
+                                setLocalState(() {
+                                  if (value == true) {
+                                    selected.add(app.packageName);
+                                  } else {
+                                    selected.remove(app.packageName);
+                                  }
+                                });
+                              },
+                            );
+                          },
+                        );
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Batal'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, selected),
+                child: const Text('Simpan'),
+              ),
+            ],
+          );
+        },
+      );
+    },
+  );
+  searchController.dispose();
+  if (result == null) return;
+  if (!context.mounted) return;
+  await state.setAllowedApps(result.toList());
 }

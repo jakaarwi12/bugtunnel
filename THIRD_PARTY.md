@@ -4,6 +4,7 @@
 |---|---|---|
 | [Flutter](https://flutter.dev) | Framework UI | BSD-3-Clause |
 | [flutter_v2ray](https://github.com/blueboy-tm/flutter_v2ray) | Jembatan Xray/VPN untuk Android | MIT |
+| [device_apps](https://pub.dev/packages/device_apps) | Daftar aplikasi untuk Mode Game | Apache-2.0 |
 | [Xray-core / AndroidLibXrayLite](https://github.com/XTLS/Xray-core) | Inti proxy | MPL-2.0 |
 | [tun2socks (badvpn)](https://github.com/ambrop72/badvpn) | Penerus lalu lintas VPN | BSD-3-Clause |
 | [http](https://pub.dev/packages/http) | Klien HTTP | BSD-3-Clause |

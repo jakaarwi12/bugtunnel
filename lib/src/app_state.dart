@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:device_apps/device_apps.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_v2ray/flutter_v2ray.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -40,6 +41,10 @@ class AppState extends ChangeNotifier {
   static const _kBugHost = 'bug_host';
   static const _kBugHostSni = 'bug_host_sni';
   static const _kDnsMode = 'dns_mode';
+  static const _kDnsServer = 'dns_server';
+  static const _kDnsSuccess = 'dns_success';
+  static const _kGameMode = 'game_mode';
+  static const _kAllowedApps = 'allowed_apps';
   static const _kSources = 'sources';
   static const _kAutoSelect = 'auto_select';
   static const _kAutoUpdate = 'auto_update';
@@ -55,6 +60,14 @@ class AppState extends ChangeNotifier {
   String bugHost = '';
   bool bugHostSni = false;
   String dnsMode = 'direct';
+  String dnsServer = 'auto';
+  bool gameMode = false;
+  List<String> allowedApps = const [
+    'com.roblox.client',
+    'com.tencent.ig',
+    'com.levelinfinite.gst',
+    'com.supercell.clashofclans',
+  ];
   List<String> sources = List<String>.from(ServerSource.defaults);
   bool autoSelect = true;
   bool autoUpdate = true;
@@ -72,8 +85,11 @@ class AppState extends ChangeNotifier {
   String appBuild = '1';
   bool checkingUpdate = false;
   bool _dnsFallbackDone = false;
+  int _disconnectSignals = 0;
   ReleaseInfo? update;
   bool updatePromptPending = false;
+
+  final Map<String, String> _dnsSuccess = {};
 
   FlutterV2ray? _core;
   bool _coreReady = false;
@@ -83,6 +99,32 @@ class AppState extends ChangeNotifier {
 
   bool get isAndroid => Platform.isAndroid;
   bool get isConnected => tunnel == TunnelState.connected;
+
+  /// Resolver yang dipakai Xray dan DNS probe.
+  List<String> get dnsServers {
+    switch (dnsServer) {
+      case 'cloudflare':
+        return const ['1.1.1.1'];
+      case 'google':
+        return const ['8.8.8.8'];
+      default:
+        return const ['8.8.8.8', '1.1.1.1'];
+    }
+  }
+
+  String get dnsServerLabel {
+    switch (dnsServer) {
+      case 'cloudflare':
+        return 'Cloudflare (1.1.1.1)';
+      case 'google':
+        return 'Google (8.8.8.8)';
+      default:
+        return 'Otomatis (8.8.8.8 + 1.1.1.1)';
+    }
+  }
+
+  /// Mode DNS yang pernah berhasil untuk server ini, jika ada.
+  String _dnsModeFor(ServerNode node) => _dnsSuccess[node.raw] ?? dnsMode;
 
   String get statusLabel {
     switch (tunnel) {
@@ -122,7 +164,10 @@ class AppState extends ChangeNotifier {
       ..writeln('Android: ${Platform.operatingSystemVersion}')
       ..writeln('Bug host: ${bugHost.isEmpty ? 'tidak diisi' : bugHost}')
       ..writeln('Ganti SNI: ${bugHostSni ? 'ya' : 'tidak'}')
-      ..writeln('Mode DNS: $dnsMode')
+      ..writeln('Mode DNS: $dnsMode (resolver: $dnsServerLabel)')
+      ..writeln(
+        'Mode Game: ${gameMode ? 'aktif (${allowedApps.length} aplikasi diizinkan)' : 'nonaktif'}',
+      )
       ..writeln('Sumber server: ${sources.length}')
       ..writeln('Server terpilih: ${selected?.name ?? '-'}')
       ..writeln('----------------------------------------');
@@ -191,6 +236,28 @@ class AppState extends ChangeNotifier {
     bugHost = _prefs.getString(_kBugHost) ?? '';
     bugHostSni = _prefs.getBool(_kBugHostSni) ?? false;
     dnsMode = _prefs.getString(_kDnsMode) == 'proxy' ? 'proxy' : 'direct';
+    final storedDnsServer = _prefs.getString(_kDnsServer);
+    dnsServer = storedDnsServer == 'google' || storedDnsServer == 'cloudflare'
+        ? storedDnsServer!
+        : 'auto';
+    gameMode = _prefs.getBool(_kGameMode) ?? false;
+    final storedApps = _prefs.getStringList(_kAllowedApps);
+    if (storedApps != null) allowedApps = storedApps;
+    final storedDnsSuccess = _prefs.getString(_kDnsSuccess);
+    if (storedDnsSuccess != null) {
+      try {
+        final decoded = jsonDecode(storedDnsSuccess);
+        if (decoded is Map) {
+          for (final entry in decoded.entries) {
+            if (entry.key is String && entry.value is String) {
+              _dnsSuccess[entry.key] = entry.value;
+            }
+          }
+        }
+      } catch (_) {
+        // Abaikan cache DNS yang rusak.
+      }
+    }
     autoSelect = _prefs.getBool(_kAutoSelect) ?? true;
     autoUpdate = _prefs.getBool(_kAutoUpdate) ?? true;
 
@@ -222,8 +289,15 @@ class AppState extends ChangeNotifier {
     );
     addLog(
       LogLevel.info,
-      'Bug host sebagai SNI: ${bugHostSni ? 'ya' : 'tidak'}, DNS: $dnsMode',
+      'Bug host sebagai SNI: ${bugHostSni ? 'ya' : 'tidak'}, '
+      'DNS: $dnsMode ($dnsServerLabel)',
     );
+    if (gameMode) {
+      addLog(
+        LogLevel.info,
+        'Mode Game aktif: ${allowedApps.length} aplikasi diizinkan',
+      );
+    }
     addLog(LogLevel.info, 'Sumber server: ${sources.length}');
 
     await _initCore();
@@ -296,6 +370,7 @@ class AppState extends ChangeNotifier {
     final previous = tunnel;
 
     if (value.contains('DISCONNECT')) {
+      _disconnectSignals++;
       if (tunnel != TunnelState.disconnecting) {
         tunnel = TunnelState.disconnected;
       }
@@ -464,18 +539,24 @@ class AppState extends ChangeNotifier {
     }
 
     addLog(LogLevel.info, 'Tes manual server ${node.name}');
+    final dns = _dnsModeFor(node);
+    final useSni = bugHostSni && !XrayConfig.hasOwnSni(node);
     final withBug = await _probe(
       _Attempt(
         node,
         bugHost,
-        bugHost.isEmpty ? 'bawaan' : 'bug host',
-        sni: bugHostSni,
-        dns: dnsMode,
+        bugHost.isEmpty
+            ? 'bawaan'
+            : useSni
+            ? 'bug host (SNI)'
+            : 'bug host (Host)',
+        sni: useSni,
+        dns: dns,
       ),
     );
     if (!withBug && bugHost.isNotEmpty) {
       addLog(LogLevel.info, 'Mencoba tes ulang tanpa bug host...');
-      await _probe(_Attempt(node, '', 'tanpa bug host', dns: dnsMode));
+      await _probe(_Attempt(node, '', 'tanpa bug host', dns: dns));
     }
   }
 
@@ -576,12 +657,20 @@ class AppState extends ChangeNotifier {
       }
 
       final attempts = _buildAttempts(candidates);
-      addLog(LogLevel.info, '${attempts.length} percobaan disiapkan');
+      addLog(
+        LogLevel.info,
+        '${attempts.length} percobaan disiapkan, resolver $dnsServerLabel',
+      );
+
+      // Mode Game meniru HTTP Injector: aplikasi di luar daftar tidak lewat
+      // tunnel. Plugin menerima daftar aplikasi yang DIBLOKIR dari VPN,
+      // sehingga kita membalik daftar "aplikasi yang diizinkan".
+      final blockedApps = gameMode ? await _blockedApps() : null;
 
       _dnsFallbackDone = false;
       final ordered = await _prioritize(attempts);
       for (final attempt in ordered) {
-        final outcome = await _tryConnect(attempt);
+        final outcome = await _tryConnect(attempt, blockedApps: blockedApps);
         if (outcome == _ConnectOutcome.connected) return;
         if (outcome == _ConnectOutcome.dnsFailed && !_dnsFallbackDone) {
           _dnsFallbackDone = true;
@@ -598,11 +687,12 @@ class AppState extends ChangeNotifier {
               sni: attempt.sni,
               dns: flipped,
             ),
+            blockedApps: blockedApps,
           );
           if (retry == _ConnectOutcome.connected) {
             addLog(
               LogLevel.success,
-              'Mode DNS $flipped berhasil. Simpan di Pengaturan untuk permanen.',
+              'Mode DNS $flipped berhasil dan disimpan untuk server ini.',
             );
             return;
           }
@@ -630,23 +720,27 @@ class AppState extends ChangeNotifier {
   List<_Attempt> _buildAttempts(List<ServerNode> candidates) {
     final attempts = <_Attempt>[];
     for (final node in candidates) {
+      final dns = _dnsModeFor(node);
+
+      // Host-only dulu: ini yang dipakai HTTP Injector dan paling aman.
       if (bugHost.isNotEmpty) {
+        attempts.add(_Attempt(node, bugHost, 'bug host (Host)', dns: dns));
+      }
+
+      // SNI bug hanya masuk akal pada node yang belum punya SNI sendiri.
+      // Memaksanya pada node TLS biasa sudah terbukti membuat Xray gagal.
+      if (bugHost.isNotEmpty && bugHostSni && !XrayConfig.hasOwnSni(node)) {
         attempts.add(
-          _Attempt(
-            node,
-            bugHost,
-            bugHostSni ? 'bug host (SNI)' : 'bug host (Host)',
-            sni: bugHostSni,
-            dns: dnsMode,
-          ),
+          _Attempt(node, bugHost, 'bug host (SNI)', sni: true, dns: dns),
         );
       }
+
       attempts.add(
         _Attempt(
           node,
           '',
           bugHost.isEmpty ? 'bawaan' : 'tanpa bug host',
-          dns: dnsMode,
+          dns: dns,
         ),
       );
       if (attempts.length >= 4) break;
@@ -686,6 +780,68 @@ class AppState extends ChangeNotifier {
     return ordered;
   }
 
+  /// Daftar aplikasi yang TIDAK boleh lewat tunnel saat Mode Game aktif.
+  ///
+  /// `flutter_v2ray` memakai `blockedApps` (diblokir dari VPN), sedangkan UI
+  /// BugTunnel menyimpan `allowedApps` (boleh lewat VPN). Karena itu daftar
+  /// diambil dari semua aplikasi terpasang lalu dikurangi daftar yang diizinkan.
+  Future<List<String>?> _blockedApps() async {
+    final allowed = allowedApps
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .toSet();
+    if (allowed.isEmpty) {
+      addLog(
+        LogLevel.warning,
+        'Mode Game aktif tetapi daftar aplikasi kosong. Semua aplikasi lewat tunnel.',
+      );
+      return null;
+    }
+    if (!Platform.isAndroid) return null;
+
+    try {
+      final installed = await DeviceApps.getInstalledApplications(
+        includeSystemApps: false,
+        onlyAppsWithLaunchIntent: true,
+      );
+      final packages = installed
+          .map((app) => app.packageName)
+          .where((item) => item.isNotEmpty)
+          .toSet();
+      final blocked = packages.difference(allowed).toList()..sort();
+      final missing = allowed.difference(packages).toList()..sort();
+
+      if (missing.isNotEmpty) {
+        addLog(
+          LogLevel.warning,
+          'Mode Game: ${missing.length} aplikasi diizinkan belum terpasang: '
+          '${missing.take(6).join(', ')}'
+          '${missing.length > 6 ? ' ...' : ''}',
+        );
+      }
+      if (blocked.isEmpty) {
+        addLog(
+          LogLevel.warning,
+          'Mode Game: tidak ada aplikasi lain untuk diblokir. Semua lewat tunnel.',
+        );
+        return null;
+      }
+      addLog(
+        LogLevel.info,
+        'Mode Game: ${allowed.length} aplikasi diizinkan, '
+        '${blocked.length} aplikasi lain tidak lewat tunnel',
+      );
+      return blocked;
+    } catch (error) {
+      addLog(
+        LogLevel.warning,
+        'Mode Game: gagal membaca aplikasi terpasang ($error). '
+        'Semua aplikasi lewat tunnel.',
+      );
+      return null;
+    }
+  }
+
   /// Menguji apakah server benar-benar bisa meneruskan trafik.
   ///
   /// Ping TCP hanya membuktikan port terbuka. Banyak server gratis menerima
@@ -706,6 +862,7 @@ class AppState extends ChangeNotifier {
         bugHost: attempt.host,
         overrideSni: attempt.sni,
         dnsMode: attempt.dns,
+        dnsServers: dnsServers,
       );
       final delay = await core
           .getServerDelay(
@@ -750,7 +907,10 @@ class AppState extends ChangeNotifier {
     return [...passed, ...failed, ...attempts.skip(2)];
   }
 
-  Future<_ConnectOutcome> _tryConnect(_Attempt attempt) async {
+  Future<_ConnectOutcome> _tryConnect(
+    _Attempt attempt, {
+    List<String>? blockedApps,
+  }) async {
     final node = attempt.node;
     selected = node;
     tunnel = TunnelState.connecting;
@@ -764,6 +924,7 @@ class AppState extends ChangeNotifier {
           bugHost: attempt.host,
           overrideSni: attempt.sni,
           dnsMode: attempt.dns,
+          dnsServers: dnsServers,
         ),
       );
     } catch (error) {
@@ -777,16 +938,42 @@ class AppState extends ChangeNotifier {
         bugHost: attempt.host,
         overrideSni: attempt.sni,
         dnsMode: attempt.dns,
+        dnsServers: dnsServers,
       );
+      if (blockedApps != null) {
+        addLog(
+          LogLevel.info,
+          'Mode Game: ${blockedApps.length} aplikasi dikecualikan dari tunnel',
+        );
+      }
+      _disconnectSignals = 0;
       await _core!.startV2Ray(
         remark: 'BugTunnel • ${node.name}',
         config: config,
+        blockedApps: blockedApps,
       );
       addLog(LogLevel.info, 'Perintah start dikirim, menunggu status...');
 
       final deadline = DateTime.now().add(const Duration(seconds: 10));
       while (DateTime.now().isBefore(deadline)) {
         await Future<void>.delayed(const Duration(milliseconds: 350));
+
+        // Xray kadang langsung mengirim DISCONNECTED. Tidak perlu menunggu
+        // 10 detik penuh sebelum mencoba server berikutnya.
+        if (_disconnectSignals >= 2 && tunnel != TunnelState.connected) {
+          addLog(
+            LogLevel.warning,
+            '${node.name} (${attempt.mode}) langsung terputus oleh core',
+          );
+          try {
+            await _core!.stopV2Ray();
+          } catch (_) {
+            // Layanan mungkin sudah berhenti sendiri.
+          }
+          _markDead(node);
+          return _ConnectOutcome.failed;
+        }
+
         if (tunnel == TunnelState.connected) {
           connectedSince = DateTime.now();
           _prefs.setString(_kSelected, node.raw);
@@ -799,10 +986,18 @@ class AppState extends ChangeNotifier {
 
           // Core CONNECTED belum menjamin aplikasi bisa internet. Uji DNS
           // lewat jalur yang sama dengan tun2socks (SOCKS 127.0.0.1:1080).
-          final dns = await DnsProbe.check();
+          final dns = await DnsProbe.check(server: dnsServers.first);
           if (dns.ok == true) {
-            addLog(LogLevel.success, 'DNS ${dns.message}');
+            _dnsSuccess[node.raw] = attempt.dns;
+            await _persistDnsSuccess();
+            addLog(
+              LogLevel.success,
+              'DNS ${dns.message}. Mode DNS ${attempt.dns} disimpan untuk server ini.',
+            );
           } else if (dns.ok == false) {
+            if (_dnsSuccess.remove(node.raw) != null) {
+              await _persistDnsSuccess();
+            }
             addLog(
               LogLevel.warning,
               'DNS gagal: ${dns.message}. Coba mode DNS lain...',
@@ -884,7 +1079,7 @@ class AppState extends ChangeNotifier {
     addLog(
       LogLevel.warning,
       bugHostSni
-          ? 'Bug host juga dipakai sebagai SNI (bisa membuat TLS gagal)'
+          ? 'Bug host juga dipakai sebagai SNI pada node tanpa SNI sendiri'
           : 'Bug host hanya dipakai sebagai header Host',
     );
     _notify();
@@ -896,6 +1091,43 @@ class AppState extends ChangeNotifier {
     addLog(
       LogLevel.info,
       'Mode DNS diubah: ${dnsMode == 'proxy' ? 'lewat server' : 'langsung'}',
+    );
+    _notify();
+  }
+
+  Future<void> setDnsServer(String value) async {
+    dnsServer = value == 'google' || value == 'cloudflare' ? value : 'auto';
+    await _prefs.setString(_kDnsServer, dnsServer);
+    addLog(LogLevel.info, 'Resolver DNS diubah: $dnsServerLabel');
+    _notify();
+  }
+
+  Future<void> setGameMode(bool value) async {
+    gameMode = value;
+    await _prefs.setBool(_kGameMode, value);
+    addLog(
+      LogLevel.info,
+      value
+          ? 'Mode Game aktif: hanya ${allowedApps.length} aplikasi yang lewat tunnel'
+          : 'Mode Game nonaktif: semua aplikasi lewat tunnel',
+    );
+    _notify();
+  }
+
+  Future<void> setAllowedApps(List<String> value) async {
+    final cleaned = <String>[];
+    for (final item in value) {
+      final package = item.trim();
+      if (package.isNotEmpty && !cleaned.contains(package))
+        cleaned.add(package);
+    }
+    allowedApps = cleaned;
+    await _prefs.setStringList(_kAllowedApps, allowedApps);
+    addLog(
+      LogLevel.info,
+      allowedApps.isEmpty
+          ? 'Daftar aplikasi Mode Game dikosongkan'
+          : '${allowedApps.length} aplikasi diizinkan lewat tunnel',
     );
     _notify();
   }
@@ -1000,6 +1232,15 @@ class AppState extends ChangeNotifier {
     bugHost = '';
     bugHostSni = false;
     dnsMode = 'direct';
+    dnsServer = 'auto';
+    gameMode = false;
+    allowedApps = const [
+      'com.roblox.client',
+      'com.tencent.ig',
+      'com.levelinfinite.gst',
+      'com.supercell.clashofclans',
+    ];
+    _dnsSuccess.clear();
     sources = List<String>.from(ServerSource.defaults);
     autoSelect = true;
     autoUpdate = true;
@@ -1013,6 +1254,10 @@ class AppState extends ChangeNotifier {
     await _prefs.remove(_kBugHost);
     await _prefs.remove(_kBugHostSni);
     await _prefs.remove(_kDnsMode);
+    await _prefs.remove(_kDnsServer);
+    await _prefs.remove(_kDnsSuccess);
+    await _prefs.remove(_kGameMode);
+    await _prefs.remove(_kAllowedApps);
     await _prefs.remove(_kSources);
     await _prefs.remove(_kAutoSelect);
     await _prefs.remove(_kAutoUpdate);
@@ -1020,6 +1265,10 @@ class AppState extends ChangeNotifier {
     await _prefs.remove(_kCache);
     addLog(LogLevel.info, 'Pengaturan direset');
     _notify();
+  }
+
+  Future<void> _persistDnsSuccess() async {
+    await _prefs.setString(_kDnsSuccess, jsonEncode(_dnsSuccess));
   }
 
   void _persistCache() {

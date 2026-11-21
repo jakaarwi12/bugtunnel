@@ -23,6 +23,7 @@ class DnsProbe {
 
   static Future<DnsProbeResult> check({
     String host = 'www.google.com',
+    String server = '8.8.8.8',
     Duration timeout = const Duration(seconds: 6),
   }) async {
     Socket? tcp;
@@ -76,7 +77,13 @@ class DnsProbe {
 
       udp = await RawDatagramSocket.bind(InternetAddress.loopbackIPv4, 0);
       final query = _buildQuery(host, 0x2f3a);
-      final packet = <int>[0, 0, 0, 1, 8, 8, 8, 8, 0, 53, ...query];
+      final resolver =
+          InternetAddress.tryParse(server) ?? InternetAddress('8.8.8.8');
+      final ip = resolver.rawAddress;
+      if (resolver.type != InternetAddressType.IPv4 || ip.length != 4) {
+        return const DnsProbeResult(null, 'Resolver DNS bukan IPv4');
+      }
+      final packet = <int>[0, 0, 0, 1, ...ip, 0, 53, ...query];
       udp.send(packet, InternetAddress(relayHost), relayPort);
 
       final completer = Completer<Uint8List?>();

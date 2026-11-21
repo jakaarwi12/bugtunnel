@@ -14,11 +14,14 @@ class XrayConfig {
   ///
   /// [dnsMode] `direct` mengirim DNS (port 53) lewat jaringan langsung,
   /// `proxy` membiarkannya lewat server.
+  ///
+  /// [dnsServers] diisi alamat IP resolver, misalnya `1.1.1.1` (Cloudflare).
   static String build(
     ServerNode node, {
     String bugHost = '',
     bool overrideSni = false,
     String dnsMode = 'direct',
+    List<String> dnsServers = const ['8.8.8.8', '1.1.1.1'],
   }) {
     final parser = parseV2RayURL(node.raw);
     final map =
@@ -27,7 +30,7 @@ class XrayConfig {
 
     _enableSniffing(map);
     _applyRouting(map, dnsMode);
-    _applyDns(map);
+    _applyDns(map, dnsServers);
 
     if (host.isNotEmpty) {
       _applyBugHost(map, host, overrideSni: overrideSni);
@@ -121,12 +124,48 @@ class XrayConfig {
     };
   }
 
-  static void _applyDns(Map<String, dynamic> config) {
+  static void _applyDns(Map<String, dynamic> config, List<String> servers) {
+    final cleaned = servers
+        .map((item) => item.trim())
+        .where((item) => InternetAddress.tryParse(item) != null)
+        .toList();
     config['dns'] = {
-      'servers': const ['8.8.8.8', '1.1.1.1'],
+      'servers': cleaned.isEmpty ? const ['8.8.8.8'] : cleaned,
       'queryStrategy': 'UseIPv4',
       'tag': 'dns_query',
     };
+  }
+
+  /// True bila link server sudah menanam SNI TLS/REALITY sendiri.
+  ///
+  /// Node seperti ini tidak boleh dipaksa memakai SNI bug host: Xray akan
+  /// menolak konfigurasi atau server menolak handshake TLS.
+  static bool hasOwnSni(ServerNode node) {
+    try {
+      final map = jsonDecode(
+        parseV2RayURL(node.raw).getFullConfiguration(),
+      ) as Map<String, dynamic>;
+      final outbounds = map['outbounds'];
+      if (outbounds is! List) return false;
+      for (final item in outbounds) {
+        if (item is! Map) continue;
+        if (item['protocol'] == 'freedom' || item['protocol'] == 'blackhole') {
+          continue;
+        }
+        final stream = item['streamSettings'];
+        if (stream is! Map) continue;
+        for (final key in const ['tlsSettings', 'realitySettings']) {
+          final tls = stream[key];
+          if (tls is Map &&
+              tls['serverName']?.toString().trim().isNotEmpty == true) {
+            return true;
+          }
+        }
+      }
+    } catch (_) {
+      // Konfigurasi rusak ditangani di tempat lain.
+    }
+    return false;
   }
 
   static String _proxyTag(Map<String, dynamic> config) {
@@ -149,9 +188,16 @@ class XrayConfig {
     String bugHost = '',
     bool overrideSni = false,
     String dnsMode = 'direct',
+    List<String> dnsServers = const ['8.8.8.8', '1.1.1.1'],
   }) {
     final map = jsonDecode(
-      build(node, bugHost: bugHost, overrideSni: overrideSni, dnsMode: dnsMode),
+      build(
+        node,
+        bugHost: bugHost,
+        overrideSni: overrideSni,
+        dnsMode: dnsMode,
+        dnsServers: dnsServers,
+      ),
     ) as Map<String, dynamic>;
     final outbounds = map['outbounds'];
 

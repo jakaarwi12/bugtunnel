@@ -8,8 +8,9 @@ Dibangun dengan Flutter/Dart dan `flutter_v2ray` (Xray core). APK di-build oleh 
 
 - **Server otomatis** — mengambil beberapa daftar server publik, menguji koneksi TCP, dan memilih ping terendah.
 - **Bug host** — secara default hanya menimpa header `Host` pada server WS/HTTP/gRPC. SNI **tidak** diubah kecuali toggle **Bug host sebagai SNI** diaktifkan. Kosongkan bila server tidak memerlukannya.
-- **DNS otomatis** — setelah core melaporkan `CONNECTED`, aplikasi menguji DNS lewat SOCKS5 Xray. Bila gagal, aplikasi otomatis mencoba mode DNS lain. Toggle **DNS lewat server** tersedia di Pengaturan.
-- **Failover** — bila server terpilih gagal, aplikasi mencoba hingga tiga server terbaik berikutnya, termasuk percobaan **tanpa bug host** bila bug host membuat koneksi gagal.
+- **DNS otomatis** — setelah core melaporkan `CONNECTED`, aplikasi menguji DNS lewat SOCKS5 Xray. Bila gagal, aplikasi otomatis mencoba mode DNS lain. Mode yang berhasil **disimpan per server**, jadi tidak diulang terus. Pilih resolver **Otomatis**, **Google (8.8.8.8)**, atau **Cloudflare (1.1.1.1)** di Pengaturan.
+- **Failover cepat** — bila server terpilih gagal, aplikasi mencoba hingga tiga server terbaik berikutnya, termasuk percobaan **tanpa bug host**. SNI bug hanya dicoba pada node yang tidak punya SNI sendiri, dan core yang langsung `DISCONNECTED` tidak menunggu 10 detik penuh.
+- **Mode Game 🎮** — hanya aplikasi yang kamu pilih yang lewat tunnel; aplikasi lain memakai koneksi biasa. Pola ini mengikuti Mode Game di HTTP Injector.
 - **Log koneksi** — tab **Log** menampilkan detail pemuatan server, hasil ping, tes server, status Xray, dan error. Semua log bisa disalin atau ditambah dengan log sistem (logcat).
 - **Daftar server** — lihat semua server, ping, pilih manual, atau muat ulang.
 - **Pembaruan otomatis** — membandingkan versi terpasang dengan rilis terbaru di GitHub dan menawarkan unduhan APK.
@@ -21,7 +22,9 @@ Dibangun dengan Flutter/Dart dan `flutter_v2ray` (Xray core). APK di-build oleh 
 2. Pasang APK (izinkan "instal dari sumber tidak dikenal" bila diminta).
 3. Buka aplikasi, tekan **Muat daftar server** di tab Server.
 4. Isi **Bug host** bila server/operatormu memerlukannya.
-5. Tekan tombol besar di Beranda, lalu izinkan permintaan VPN Android.
+5. Di Pengaturan, pilih **Resolver DNS** (Cloudflare sering lebih baik bila Google lambat).
+6. Aktifkan **Mode Game** dan pilih aplikasi yang boleh lewat tunnel bila hanya ingin mem-tunnel game.
+7. Tekan tombol besar di Beranda, lalu izinkan permintaan VPN Android.
 
 Saat pertama kali menyambung, Android akan menampilkan dialog izin VPN. Ini wajib agar lalu lintas perangkat bisa dialirkan melalui tunnel.
 
@@ -36,6 +39,12 @@ Isi tanpa `https://`, misalnya:
 ```
 bug.example.com
 ```
+
+## Mode Game
+
+Mode Game meniru perilaku HTTP Injector: hanya aplikasi dalam daftar **Aplikasi yang diizinkan** yang lalu lintasnya lewat VPN. Aplikasi lain memakai jaringan biasa. Daftar berisi package name (misalnya `com.roblox.client`), dipilih lewat Pengaturan → **Aplikasi yang diizinkan**.
+
+Mode Game tidak menambah server atau akun. Ia hanya mengatur pengecualian aplikasi pada VPN Android. Bila daftar kosong atau daftar aplikasi tidak bisa dibaca, BugTunnel otomatis membiarkan semua aplikasi lewat tunnel dan menulis peringatan di tab **Log**.
 
 ## Sumber server
 
@@ -106,7 +115,7 @@ lib/
       settings_page.dart
       widgets.dart
 tool/
-  patch_android.py          # minSdk, signing, useLegacyPackaging, izin VPN
+  patch_android.py          # minSdk, signing, useLegacyPackaging, izin VPN + QUERY_ALL_PACKAGES
   icon/                     # ikon aplikasi
 ```
 
@@ -117,6 +126,8 @@ tool/
 - Bug host hanya menimpa Host (dan SNI bila diaktifkan). Tidak ada manipulasi payload atau kuota operator.
 - Node VLESS tanpa TLS ke IP publik dilewati karena ditolak Xray. Tampil sebagai peringatan di log, bukan error fatal.
 - Aplikasi tidak menyediakan server, akun, atau langganan.
+- Konfigurasi `.ehi` HTTP Injector dan akun SSH bawaan aplikasi tersebut tidak bisa dipindahkan ke BugTunnel. BugTunnel memakai Xray, bukan konektor SSH; SNI seperti `facebook.com` pada HTTP Injector adalah penyamar TLS untuk SSH, bukan SNI node VLESS/VMess.
+- Mode Game memakai daftar package name. Aplikasi yang tidak terpasang tidak bisa dipilih dan akan muncul sebagai peringatan di log.
 
 ## Troubleshooting
 
@@ -124,10 +135,14 @@ tool/
 
 1. Buka tab **Log**, tekan **Hapus log**, lalu **Tes server terpilih**.
 2. Kosongkan **Bug host** dan pastikan **Bug host sebagai SNI nonaktif**, lalu sambung lagi. Aplikasi juga otomatis mencoba tanpa bug host.
-3. Perhatikan baris `DNS ...`. Bila tertulis `DNS gagal`, aktifkan **Pengaturan → DNS lewat server** (atau biarkan aplikasi mencoba otomatis saat connecting).
+3. Perhatikan baris `DNS ...`. Bila tertulis `DNS gagal`, biarkan aplikasi mencoba mode lain (mode yang berhasil disimpan per server), lalu coba **Pengaturan → Resolver DNS → Cloudflare** bila Google lambat. Toggle **DNS lewat server** tetap tersedia sebagai cadangan.
 4. Set **Private DNS** Android ke **Off** atau **Automatic**.
 5. Muat ulang daftar server; server publik sering mati.
 6. Salin log lewat **Salin semua** bila masih gagal.
+
+**Mode Game aktif tetapi aplikasi tertentu tidak bisa internet**
+
+Pastikan package name aplikasi itu benar-benar dicentang di **Pengaturan → Aplikasi yang diizinkan**, lalu sambung ulang. Perubahan daftar aplikasi baru berlaku pada koneksi berikutnya. Baris `Mode Game: N aplikasi diizinkan, M aplikasi lain tidak lewat tunnel` di tab **Log** menunjukkan filter yang dipakai.
 
 **Semua server gagal**
 
