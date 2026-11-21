@@ -27,7 +27,6 @@ class _Attempt {
     this.mode, {
     this.sni = false,
     this.dns = 'direct',
-    this.insecure = false,
   });
 
   final ServerNode node;
@@ -35,16 +34,14 @@ class _Attempt {
   final String mode;
   final bool sni;
   final String dns;
-  final bool insecure;
 
-  _Attempt copyWith({String? mode, String? dns, bool? insecure}) {
+  _Attempt copyWith({String? mode, String? dns}) {
     return _Attempt(
       node,
       host,
       mode ?? this.mode,
       sni: sni,
       dns: dns ?? this.dns,
-      insecure: insecure ?? this.insecure,
     );
   }
 }
@@ -57,7 +54,6 @@ class AppState extends ChangeNotifier {
   static const _kDnsMode = 'dns_mode';
   static const _kDnsServer = 'dns_server';
   static const _kDnsSuccess = 'dns_success';
-  static const _kAllowInsecure = 'allow_insecure';
   static const _kGameMode = 'game_mode';
   static const _kAllowedApps = 'allowed_apps';
   static const _kSources = 'sources';
@@ -76,7 +72,6 @@ class AppState extends ChangeNotifier {
   bool bugHostSni = false;
   String dnsMode = 'direct';
   String dnsServer = 'auto';
-  bool allowInsecure = false;
   bool gameMode = false;
   List<String> allowedApps = const [
     'com.roblox.client',
@@ -255,7 +250,6 @@ class AppState extends ChangeNotifier {
     dnsServer = storedDnsServer == 'google' || storedDnsServer == 'cloudflare'
         ? storedDnsServer!
         : 'auto';
-    allowInsecure = _prefs.getBool(_kAllowInsecure) ?? false;
     gameMode = _prefs.getBool(_kGameMode) ?? false;
     final storedApps = _prefs.getStringList(_kAllowedApps);
     if (storedApps != null) allowedApps = storedApps;
@@ -306,8 +300,7 @@ class AppState extends ChangeNotifier {
     addLog(
       LogLevel.info,
       'Bug host sebagai SNI: ${bugHostSni ? 'ya' : 'tidak'}, '
-      'DNS: $dnsMode ($dnsServerLabel), '
-      'TLS insecure: ${allowInsecure ? 'ya' : 'tidak'}',
+      'DNS: $dnsMode ($dnsServerLabel)',
     );
     if (gameMode) {
       addLog(
@@ -685,15 +678,19 @@ class AppState extends ChangeNotifier {
       final blockedApps = gameMode ? await _blockedApps() : null;
 
       final ordered = await _prioritize(attempts);
+      var tunnelReached = false;
       for (final attempt in ordered) {
         final outcome = await _tryWithFallbacks(
           attempt,
           blockedApps: blockedApps,
         );
         if (outcome == _ConnectOutcome.connected) return;
+        if (outcome == _ConnectOutcome.tunnelFailed) tunnelReached = true;
       }
-      lastError =
-          'Semua server gagal terhubung. Coba muat ulang daftar server.';
+      lastError = tunnelReached
+          ? 'Server sempat tersambung, tetapi internet lewat tunnel tidak bisa. '
+                'Lihat baris "Tes internet lewat tunnel" di Log.'
+          : 'Semua server gagal terhubung. Coba muat ulang daftar server.';
       addLog(LogLevel.error, lastError!);
       await captureSystemLog();
     } catch (error) {
@@ -854,7 +851,6 @@ class AppState extends ChangeNotifier {
         overrideSni: attempt.sni,
         dnsMode: attempt.dns,
         dnsServers: dnsServers,
-        allowInsecure: allowInsecure || attempt.insecure,
       );
       final delay = await core
           .getServerDelay(
@@ -899,50 +895,25 @@ class AppState extends ChangeNotifier {
     return [...passed, ...failed, ...attempts.skip(2)];
   }
 
-  /// Mencoba kombinasi TLS insecure dan mode DNS bila tes tunnel gagal.
-  ///
-  /// Urutannya: insecure dengan DNS sama → DNS dibalik → keduanya. Bila core
-  /// melaporkan server mati (`failed`), tidak ada gunanya mencoba kombinasi
-  /// lain pada server yang sama.
+  /// Satu kali percobaan tambahan dengan mode DNS dibalik bila tes tunnel
+  /// gagal. TLS insecure tidak lagi dicoba: Xray 26.7.11+ menghapusnya dan
+  /// konfigurasi semacam itu langsung ditolak core.
   Future<_ConnectOutcome> _tryWithFallbacks(
     _Attempt attempt, {
     List<String>? blockedApps,
   }) async {
-    var last = await _tryConnect(attempt, blockedApps: blockedApps);
-    if (last == _ConnectOutcome.connected || last == _ConnectOutcome.failed) {
-      return last;
+    final first = await _tryConnect(attempt, blockedApps: blockedApps);
+    if (first == _ConnectOutcome.connected || first == _ConnectOutcome.failed) {
+      return first;
     }
 
     final flipped = attempt.dns == 'proxy' ? 'direct' : 'proxy';
-    final retries = <_Attempt>[
-      if (!attempt.insecure)
-        attempt.copyWith(
-          mode: '${attempt.mode} • TLS insecure',
-          insecure: true,
-        ),
-      attempt.copyWith(mode: '${attempt.mode} • DNS $flipped', dns: flipped),
-      if (!attempt.insecure)
-        attempt.copyWith(
-          mode: '${attempt.mode} • TLS insecure • DNS $flipped',
-          insecure: true,
-          dns: flipped,
-        ),
-    ];
-
-    for (final next in retries) {
-      if (next.insecure && !attempt.insecure) {
-        addLog(
-          LogLevel.warning,
-          'TLS insecure dicoba otomatis karena sertifikat server mungkin bermasalah.',
-        );
-      }
-      addLog(LogLevel.info, 'Mencoba ulang dengan ${next.mode}...');
-      last = await _tryConnect(next, blockedApps: blockedApps);
-      if (last == _ConnectOutcome.connected || last == _ConnectOutcome.failed) {
-        return last;
-      }
-    }
-    return last;
+    final retry = attempt.copyWith(
+      mode: '${attempt.mode} • DNS $flipped',
+      dns: flipped,
+    );
+    addLog(LogLevel.info, 'Mencoba ulang dengan ${retry.mode}...');
+    return _tryConnect(retry, blockedApps: blockedApps);
   }
 
   Future<_ConnectOutcome> _tryConnect(
@@ -963,7 +934,6 @@ class AppState extends ChangeNotifier {
           overrideSni: attempt.sni,
           dnsMode: attempt.dns,
           dnsServers: dnsServers,
-          allowInsecure: allowInsecure || attempt.insecure,
         ),
       );
     } catch (error) {
@@ -978,7 +948,6 @@ class AppState extends ChangeNotifier {
         overrideSni: attempt.sni,
         dnsMode: attempt.dns,
         dnsServers: dnsServers,
-        allowInsecure: allowInsecure || attempt.insecure,
       );
       if (blockedApps != null) {
         addLog(
@@ -1154,18 +1123,6 @@ class AppState extends ChangeNotifier {
     _notify();
   }
 
-  Future<void> setAllowInsecure(bool value) async {
-    allowInsecure = value;
-    await _prefs.setBool(_kAllowInsecure, value);
-    addLog(
-      value ? LogLevel.warning : LogLevel.info,
-      value
-          ? 'TLS insecure diaktifkan: verifikasi sertifikat Xray dilewati'
-          : 'TLS insecure dinonaktifkan: sertifikat Xray diverifikasi',
-    );
-    _notify();
-  }
-
   Future<void> setGameMode(bool value) async {
     gameMode = value;
     await _prefs.setBool(_kGameMode, value);
@@ -1297,7 +1254,6 @@ class AppState extends ChangeNotifier {
     bugHostSni = false;
     dnsMode = 'direct';
     dnsServer = 'auto';
-    allowInsecure = false;
     gameMode = false;
     allowedApps = const [
       'com.roblox.client',
@@ -1321,7 +1277,6 @@ class AppState extends ChangeNotifier {
     await _prefs.remove(_kDnsMode);
     await _prefs.remove(_kDnsServer);
     await _prefs.remove(_kDnsSuccess);
-    await _prefs.remove(_kAllowInsecure);
     await _prefs.remove(_kGameMode);
     await _prefs.remove(_kAllowedApps);
     await _prefs.remove(_kSources);

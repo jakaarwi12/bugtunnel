@@ -10,7 +10,7 @@ Dibangun dengan Flutter/Dart dan `flutter_v2ray` (Xray core). APK di-build oleh 
 - **Bug host** — secara default hanya menimpa header `Host` pada server WS/HTTP/gRPC. SNI **tidak** diubah kecuali toggle **Bug host sebagai SNI** diaktifkan. Kosongkan bila server tidak memerlukannya.
 - **DNS otomatis** — setelah core melaporkan `CONNECTED`, aplikasi menguji DNS lewat SOCKS5 Xray. Bila gagal, aplikasi otomatis mencoba mode DNS lain. Mode yang berhasil **disimpan per server**, jadi tidak diulang terus. Pilih resolver **Otomatis**, **Google (8.8.8.8)**, atau **Cloudflare (1.1.1.1)** di Pengaturan.
 - **Failover cepat** — bila server terpilih gagal, aplikasi mencoba hingga tiga server terbaik berikutnya, termasuk percobaan **tanpa bug host**. SNI bug hanya dicoba pada node yang tidak punya SNI sendiri, dan core yang langsung `DISCONNECTED` tidak menunggu 10 detik penuh.
-- **Izinkan TLS insecure** (v1.0.5) — melewati verifikasi sertifikat TLS pada Xray. Bawaan **mati** karena lebih aman; aktifkan hanya bila server gratis memakai sertifikat tidak valid dan koneksi mentok. Tersedia di **Pengaturan → Koneksi**.
+- **Kompatibilitas Xray terbaru** (v1.0.6) — field TLS lama `allowInsecure` otomatis dibuang dari konfigurasi karena sudah ditolak Xray sejak 26.7.11. Saat **Bug host sebagai SNI** aktif pada node bersertifikat, verifikasi memakai `verifyPeerCertByName` dengan nama SNI asli (pengganti resmi dari Xray), jadi koneksi tetap bisa dibangun tanpa melewati verifikasi sertifikat.
 - **Mode Game 🎮** — hanya aplikasi yang kamu pilih yang lewat tunnel; aplikasi lain memakai koneksi biasa. Pola ini mengikuti Mode Game di HTTP Injector.
 - **Log koneksi** — tab **Log** menampilkan detail pemuatan server, hasil ping, tes server, status Xray, dan error. Semua log bisa disalin atau ditambah dengan log sistem (logcat).
 - **Daftar server** — lihat semua server, ping, pilih manual, atau muat ulang.
@@ -135,15 +135,17 @@ tool/
 
 **Tersambung tetapi Chrome/YouTube tidak bisa internet (mis. `ping 8.8.8.8` lolos, `ping google.com` gagal)**
 
-Sejak **v1.0.5**, setelah core melaporkan `CONNECTED` aplikasi tidak hanya menguji DNS, tetapi juga menguji **HTTPS nyata lewat tunnel** (permintaan `generate_204`). Jadi "tersambung" belum berarti internet benar-benar jalan. Baris log yang perlu diperhatikan antara lain `Tes internet lewat tunnel ...` (berhasil/gagal) dan `TLS insecure dicoba otomatis` ketika handshake TLS gagal karena sertifikat server.
+Sejak **v1.0.5**, setelah core melaporkan `CONNECTED` aplikasi tidak hanya menguji DNS, tetapi juga menguji **HTTPS nyata lewat tunnel** (permintaan `generate_204`). Jadi "tersambung" belum berarti internet benar-benar jalan. Node yang lolos `CONNECTED` tetapi gagal tes HTTPS **ditolak** dan aplikasi lanjut failover. Baris log penentunya adalah `Tes internet lewat tunnel OK` atau `Tes internet lewat tunnel gagal`.
 
 1. Buka tab **Log**, tekan **Hapus log**, lalu **Tes server terpilih**.
 2. Kosongkan **Bug host** dan pastikan **Bug host sebagai SNI nonaktif**, lalu sambung lagi. Aplikasi juga otomatis mencoba tanpa bug host.
-3. Perhatikan baris `DNS ...`. Bila tertulis `DNS gagal`, biarkan aplikasi mencoba mode lain (mode yang berhasil disimpan per server), lalu coba **Pengaturan → Resolver DNS → Cloudflare** bila Google lambat. Toggle **DNS lewat server** tetap tersedia sebagai cadangan.
-4. Perhatikan baris `Tes internet lewat tunnel ...`. Bila DNS lolos tetapi tes ini `gagal`, sertifikat server kemungkinan bermasalah: aktifkan **Pengaturan → Izinkan TLS insecure** lalu sambung ulang. Aplikasi biasanya sudah mencobanya otomatis (baris `TLS insecure dicoba otomatis`). Opsi ini **kurang aman**, jadi matikan lagi setelah tidak diperlukan.
+3. Perhatikan baris `DNS ...` hanya sebagai diagnostik. Dengan mode DNS `direct`, DNS dijawab jaringan Android, jadi baris ini **bukan** bukti tunnel bisa internet. Yang menentukan adalah baris `Tes internet lewat tunnel ...`.
+4. Bila tes tunnel gagal, biarkan aplikasi mencoba mode DNS lain (mode yang lolos disimpan per server), lalu coba **Pengaturan → Resolver DNS → Cloudflare**. Toggle **DNS lewat server** tetap tersedia sebagai cadangan.
 5. Set **Private DNS** Android ke **Off** atau **Automatic**.
 6. Muat ulang daftar server; server publik sering mati.
 7. Salin log lewat **Salin semua** bila masih gagal.
+
+Catatan: opsi **Izinkan TLS insecure** yang ada di v1.0.5 sudah dihapus di v1.0.6. Xray 26.7.11+ tidak mengenal field itu lagi, sehingga mengaktifkannya justru membuat konfigurasi ditolak dan semua node gagal terhubung.
 
 **Mode Game aktif tetapi aplikasi tertentu tidak bisa internet**
 

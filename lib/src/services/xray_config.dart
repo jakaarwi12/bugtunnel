@@ -22,13 +22,15 @@ class XrayConfig {
     bool overrideSni = false,
     String dnsMode = 'direct',
     List<String> dnsServers = const ['8.8.8.8', '1.1.1.1'],
-    bool allowInsecure = false,
   }) {
     final parser = parseV2RayURL(node.raw);
     final map =
         jsonDecode(parser.getFullConfiguration()) as Map<String, dynamic>;
     final host = bugHost.trim();
 
+    // Xray >= 26.7.11 Menolak seluruh konfigurasi bila field lama ini masih
+    // ada, termasuk ketika berasal dari link langganan publik.
+    _stripRemovedFields(map);
     _enableSniffing(map);
     _applyRouting(map, dnsMode);
     _applyDns(map, dnsServers);
@@ -37,21 +39,14 @@ class XrayConfig {
       _applyBugHost(map, host, overrideSni: overrideSni);
     }
 
-    // SNI bug membuat sertifikat tidak cocok. Link juga bisa menanam
-    // allowInsecure, dan pengguna bisa memaksanya lewat pengaturan.
-    if (allowInsecure ||
-        (host.isNotEmpty && overrideSni) ||
-        _wantsInsecure(node.raw)) {
-      _setAllowInsecure(map);
-    }
-
     return jsonEncode(map);
   }
 
   /// Mengembalikan alasan server tidak mungkin dipakai, atau null bila valid.
   ///
-  /// Xray menolak VLESS tanpa TLS ke alamat IP publik. Node seperti ini
-  /// selalu gagal dan sebaiknya dilewati.
+  /// Sejak Xray 26.7.11, VLESS tanpa TLS/REALITY maupun VLESS Encryption
+  /// ditolak untuk alamat publik (IP maupun domain biasa). Node seperti ini
+  /// selalu gagal di tahap parse, jadi lebih baik dilewati lebih awal.
   static String? validationError(ServerNode node) {
     try {
       final parser = parseV2RayURL(node.raw);
@@ -69,10 +64,15 @@ class XrayConfig {
             : '';
         if (security.isNotEmpty && security != 'none') continue;
 
-        final address = InternetAddress.tryParse(node.address);
-        if (address == null) continue;
-        if (_isPrivate(address)) continue;
-        return 'VLESS tanpa TLS ke IP publik tidak didukung Xray';
+        // VLESS Encryption juga memenuhi syarat Xray.
+        final settings = item['settings'];
+        final encryption = settings is Map
+            ? settings['encryption']?.toString().trim() ?? ''
+            : '';
+        if (encryption.isNotEmpty && encryption != 'none') continue;
+
+        if (_isPrivateHost(node.address)) continue;
+        return 'VLESS tanpa TLS/enkripsi ke alamat publik ditolak Xray';
       }
     } catch (_) {
       // Konfigurasi rusak akan gagal di tahap lain.
@@ -192,7 +192,6 @@ class XrayConfig {
     bool overrideSni = false,
     String dnsMode = 'direct',
     List<String> dnsServers = const ['8.8.8.8', '1.1.1.1'],
-    bool allowInsecure = false,
   }) {
     final map = jsonDecode(
       build(
@@ -201,7 +200,6 @@ class XrayConfig {
         overrideSni: overrideSni,
         dnsMode: dnsMode,
         dnsServers: dnsServers,
-        allowInsecure: allowInsecure,
       ),
     ) as Map<String, dynamic>;
     final outbounds = map['outbounds'];
@@ -224,17 +222,14 @@ class XrayConfig {
 
     String? sni;
     String? host;
-    var insecure = false;
     if (stream is Map) {
       final tls = stream['tlsSettings'];
       if (tls is Map) {
         sni = tls['serverName']?.toString();
-        insecure = tls['allowInsecure'] == true;
       }
       final reality = stream['realitySettings'];
       if (reality is Map) {
         sni ??= reality['serverName']?.toString();
-        insecure = insecure || reality['allowInsecure'] == true;
       }
       final ws = stream['wsSettings'];
       if (ws is Map && ws['headers'] is Map) {
@@ -252,8 +247,7 @@ class XrayConfig {
     return '${node.protocol} ${node.endpoint} '
         'net=${network ?? '-'} security=${security ?? '-'} '
         'sni=${sni ?? '-'} host=${host ?? '-'} '
-        'sniMode=${overrideSni ? 'bug' : 'asli'} '
-        'insecure=$insecure dns=$dnsMode';
+        'sniMode=${overrideSni ? 'bug' : 'asli'} dns=$dnsMode';
   }
 
   static void _applyBugHost(
@@ -280,6 +274,14 @@ class XrayConfig {
         final security = stream['security']?.toString() ?? '';
         if (security == 'tls' || security == 'xtls') {
           final tls = _asMap(stream['tlsSettings']);
+
+          // Xray menghapus allowInsecure. Pengganti resminya untuk domain
+          // fronting adalah verifyPeerCertByName: nama asli dipakai untuk
+          // verifikasi sertifikat, sementara SNI di kabel tetap bug host.
+          final originalSni = tls['serverName']?.toString().trim() ?? '';
+          if (originalSni.isNotEmpty) {
+            tls['verifyPeerCertByName'] = originalSni;
+          }
           tls['serverName'] = bugHost;
           stream['tlsSettings'] = tls;
         } else if (security == 'reality') {
@@ -327,49 +329,54 @@ class XrayConfig {
     }
   }
 
-  static void _setAllowInsecure(Map<String, dynamic> config) {
-    final outbounds = config['outbounds'];
-    if (outbounds is! List) return;
-    for (final item in outbounds) {
-      if (item is! Map) continue;
-      final stream = item['streamSettings'];
-      if (stream is! Map) continue;
-      final security = stream['security']?.toString() ?? '';
-      if (security == 'tls' || security == 'xtls') {
-        final tls = _asMap(stream['tlsSettings']);
-        tls['allowInsecure'] = true;
-        stream['tlsSettings'] = tls;
-      } else if (security == 'reality') {
-        final reality = _asMap(stream['realitySettings']);
-        reality['allowInsecure'] = true;
-        stream['realitySettings'] = reality;
+  /// Membuang field TLS yang sudah dihapus Xray.
+  ///
+  /// Xray 26.7.11+ menganggap `allowInsecure` sebagai konfigurasi invalid dan
+  /// menolak seluruh outbound. Field ini sering masih tertanam di link gratis.
+  static void _stripRemovedFields(dynamic value) {
+    if (value is List) {
+      for (final item in value) {
+        _stripRemovedFields(item);
+      }
+      return;
+    }
+    if (value is! Map) return;
+
+    final map = value as Map<dynamic, dynamic>;
+    for (final key in map.keys.toList()) {
+      final lower = key.toString().toLowerCase();
+      if (lower == 'allowinsecure' || lower == 'verifypeercertinnames') {
+        map.remove(key);
+      } else {
+        _stripRemovedFields(map[key]);
       }
     }
   }
 
-  static bool _wantsInsecure(String raw) {
-    final lower = raw.toLowerCase();
-    return lower.contains('allowinsecure=1') ||
-        lower.contains('allowinsecure=true') ||
-        lower.contains('"allowinsecure":true') ||
-        lower.contains('"allowinsecure":"1"') ||
-        lower.contains('skip-cert-verify=true');
-  }
-
-  static bool _isPrivate(InternetAddress address) {
-    final bytes = address.rawAddress;
-    if (address.type == InternetAddressType.IPv4) {
-      return bytes[0] == 10 ||
-          bytes[0] == 127 ||
-          (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
-          (bytes[0] == 192 && bytes[1] == 168) ||
-          (bytes[0] == 169 && bytes[1] == 254);
+  static bool _isPrivateHost(String raw) {
+    final host = raw.trim().toLowerCase();
+    final address = InternetAddress.tryParse(host);
+    if (address != null) {
+      final bytes = address.rawAddress;
+      if (address.type == InternetAddressType.IPv4) {
+        return bytes[0] == 10 ||
+            bytes[0] == 127 ||
+            (bytes[0] == 172 && bytes[1] >= 16 && bytes[1] <= 31) ||
+            (bytes[0] == 192 && bytes[1] == 168) ||
+            (bytes[0] == 169 && bytes[1] == 254);
+      }
+      if (bytes.length >= 2) {
+        if ((bytes[0] & 0xFE) == 0xFC) return true;
+        if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;
+      }
+      return false;
     }
-    if (bytes.length >= 2) {
-      if ((bytes[0] & 0xFE) == 0xFC) return true;
-      if (bytes[0] == 0xFE && (bytes[1] & 0xC0) == 0x80) return true;
-    }
-    return false;
+    return host == 'localhost' ||
+        host.endsWith('.local') ||
+        host.endsWith('.lan') ||
+        host.endsWith('.internal') ||
+        host.endsWith('.home.arpa') ||
+        host.endsWith('.test');
   }
 
   static Map<String, dynamic> _asMap(dynamic value) {

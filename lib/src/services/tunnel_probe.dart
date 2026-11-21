@@ -55,9 +55,9 @@ class TunnelProbe {
       if (!addressOk) {
         return const TunnelProbeResult(false, 'Alamat SOCKS tidak dikenal');
       }
-      // Lepaskan iterator sebelum TLS supaya tidak ada byte yang tersedot
-      // oleh pembaca SOCKS.
-      await reader.cancel();
+      // Iterator sengaja tidak dibatalkan: SecureSocket.secure() akan
+      // melepaskan langganan socket ini sendiri. Membatalkannya lebih awal
+      // membuat handshake TLS gagal.
 
       // Sertifikat situs tujuan sengaja tidak divalidasi di sini. Yang diuji
       // adalah jalur tunnel, bukan identitas google.com.
@@ -147,8 +147,6 @@ class _ByteReader {
 
   final StreamIterator<List<int>> _iterator;
   final List<int> _buffer = [];
-
-  Future<void> cancel() => _iterator.cancel();
 
   Future<List<int>> read(int count) async {
     while (_buffer.length < count) {
