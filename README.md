@@ -107,6 +107,7 @@ lib/
       latency.dart          # ping TCP
       xray_config.dart      # konfigurasi Xray + bug host/SNI + routing DNS
       dns_probe.dart        # uji DNS lewat SOCKS5 Xray
+      installed_apps.dart   # daftar aplikasi Mode Game lewat MethodChannel
       update_service.dart   # GitHub Releases API
     ui/
       root_shell.dart

@@ -213,6 +213,79 @@ def remove_generated_tests() -> None:
             print(f"{relative} dihapus (template tidak dipakai).")
 
 
+def patch_main_activity() -> None:
+    """MethodChannel untuk membaca daftar aplikasi (Mode Game).
+
+    Plugin device_apps 2.2.0 masih memakai `jcenter()` dan gagal di Gradle
+    modern. Karena proyek Android dibuat ulang oleh `flutter create`, cukup
+    tulis ulang MainActivity dengan implementasi minimal memakai PackageManager.
+    """
+    path = (
+        APP
+        / "src"
+        / "main"
+        / "kotlin"
+        / "com"
+        / "jakaarwi"
+        / "bugtunnel"
+        / "MainActivity.kt"
+    )
+    if not path.exists():
+        fail(f"MainActivity.kt tidak ditemukan di {path}.")
+
+    source = """package com.jakaarwi.bugtunnel
+
+import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity : FlutterActivity() {
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(
+            flutterEngine.dartExecutor.binaryMessenger,
+            "com.jakaarwi.bugtunnel/apps",
+        ).setMethodCallHandler { call, result ->
+            if (call.method != "getInstalledApps") {
+                result.notImplemented()
+                return@setMethodCallHandler
+            }
+            try {
+                val pm = packageManager
+                val systemFlag =
+                    ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP
+                val apps = pm.getInstalledApplications(PackageManager.MATCH_ALL)
+                    .filter { (it.flags and systemFlag) == 0 }
+                    .filter { pm.getLaunchIntentForPackage(it.packageName) != null }
+                    .map { info ->
+                        val name = try {
+                            info.loadLabel(pm).toString()
+                        } catch (_: Exception) {
+                            info.packageName
+                        }
+                        mapOf(
+                            "package" to info.packageName,
+                            "name" to name.ifEmpty { info.packageName },
+                        )
+                    }
+                result.success(apps)
+            } catch (error: Exception) {
+                result.error(
+                    "APP_LIST_ERROR",
+                    error.message ?: "Gagal membaca aplikasi terpasang",
+                    null,
+                )
+            }
+        }
+    }
+}
+"""
+    path.write_text(source, encoding="utf-8")
+    print("MainActivity.kt dipatch untuk daftar aplikasi Mode Game.")
+
+
 def main() -> None:
     if not ANDROID.exists():
         fail("Folder android/ belum ada. Jalankan `flutter create` dulu.")
@@ -230,6 +303,7 @@ def main() -> None:
     if not manifest.exists():
         fail("AndroidManifest.xml tidak ditemukan.")
     patch_manifest(manifest)
+    patch_main_activity()
     copy_icons()
     remove_generated_tests()
 

@@ -1,7 +1,7 @@
-import 'package:device_apps/device_apps.dart';
 import 'package:flutter/material.dart';
 
 import '../app_state.dart';
+import '../services/installed_apps.dart';
 import '../theme.dart';
 
 class AppLogo extends StatelessWidget {
@@ -453,10 +453,7 @@ Future<void> showDnsServerDialog(BuildContext context, AppState state) async {
 }
 
 Future<void> showAllowedAppsDialog(BuildContext context, AppState state) async {
-  final future = DeviceApps.getInstalledApplications(
-    includeSystemApps: false,
-    onlyAppsWithLaunchIntent: true,
-  );
+  final future = InstalledApps.load();
   final selected = state.allowedApps.toSet();
   final searchController = TextEditingController();
   var query = '';
@@ -498,7 +495,7 @@ Future<void> showAllowedAppsDialog(BuildContext context, AppState state) async {
                   const SizedBox(height: 8),
                   SizedBox(
                     height: 320,
-                    child: FutureBuilder<List<Application>>(
+                    child: FutureBuilder<List<InstalledApp>>(
                       future: future,
                       builder: (context, snapshot) {
                         if (snapshot.connectionState != ConnectionState.done) {
@@ -523,7 +520,7 @@ Future<void> showAllowedAppsDialog(BuildContext context, AppState state) async {
                         }
                         final needle = query.trim().toLowerCase();
                         final apps =
-                            (snapshot.data ?? const <Application>[]).where((
+                            (snapshot.data ?? const <InstalledApp>[]).where((
                               app,
                             ) {
                               if (needle.isEmpty) return true;

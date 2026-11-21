@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:device_apps/device_apps.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_v2ray/flutter_v2ray.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -12,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'models.dart';
 import 'log.dart';
 import 'services/dns_probe.dart';
+import 'services/installed_apps.dart';
 import 'services/latency.dart';
 import 'services/server_source.dart';
 import 'services/update_service.dart';
@@ -800,10 +800,7 @@ class AppState extends ChangeNotifier {
     if (!Platform.isAndroid) return null;
 
     try {
-      final installed = await DeviceApps.getInstalledApplications(
-        includeSystemApps: false,
-        onlyAppsWithLaunchIntent: true,
-      );
+      final installed = await InstalledApps.load();
       final packages = installed
           .map((app) => app.packageName)
           .where((item) => item.isNotEmpty)
